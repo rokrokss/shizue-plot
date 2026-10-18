@@ -1,5 +1,6 @@
 'use client';
 
+import { DEFAULT_PRESET, type PromptTemplateItem } from '@shizue/core';
 import {
   readReaderPresetFile,
   READER_PRESET_INTEGRATION_MAX,
@@ -16,26 +17,70 @@ import type { ReaderPreset } from '@/lib/types';
 import { useErrorMessage } from '@/lib/useErrorMessage';
 import { Button, ErrorText, Field, Select, TextArea, TextInput } from './ui';
 
-/** What the editor holds: a preset being written, new (`id` null) or one being changed. */
-interface Draft {
+/**
+ * What the editor holds: a preset being written, new (`id` null) or one being
+ * changed — every field of the row, the ones it has no control for
+ * (`formatingOrder`, the group settings) carried through to the save as they came.
+ */
+interface Draft extends Omit<ReaderPreset, 'id' | 'createdAt' | 'updatedAt'> {
   id: string | null;
-  name: string;
-  main: string;
-  globalNote: string;
-  /** RisuAI's preset toggles (`customPromptTemplateToggle`), in its toggle syntax. */
-  toggles: string;
-  /** RisuAI's `moduleIntergration`: namespaces, separated by commas. */
-  moduleIntegration: string;
-  /** RisuAI's `templateDefaultVariables`: `key=value` lines. */
-  defaultVariables: string;
   /** What the file it came from held, when it came from one — for the notice. */
   imported?: ReaderPresetImport;
 }
 
+/** A new preset: PocketRisu's "new preset", a copy of the built-in default (OAI2). */
+const newDraft = (name: string): Draft => ({
+  id: null,
+  name,
+  main: DEFAULT_PRESET.mainPrompt,
+  globalNote: DEFAULT_PRESET.globalNote,
+  jailbreak: DEFAULT_PRESET.jailbreak,
+  // The default's order is RisuAI's, which null stands for; a template does not read it.
+  formatingOrder: null,
+  promptTemplate: (DEFAULT_PRESET.promptTemplate ?? []).map((item) => ({ ...item })),
+  groupTemplate: DEFAULT_PRESET.groupTemplate,
+  groupOtherBotRole: DEFAULT_PRESET.groupOtherBotRole,
+  toggles: '',
+  moduleIntegration: '',
+  defaultVariables: '',
+});
+
+const fromRow = (preset: ReaderPreset): Draft => ({
+  id: preset.id,
+  name: preset.name,
+  main: preset.main,
+  globalNote: preset.globalNote,
+  jailbreak: preset.jailbreak,
+  formatingOrder: preset.formatingOrder,
+  promptTemplate: preset.promptTemplate,
+  groupTemplate: preset.groupTemplate,
+  groupOtherBotRole: preset.groupOtherBotRole,
+  toggles: preset.toggles ?? '',
+  moduleIntegration: preset.moduleIntegration ?? '',
+  defaultVariables: preset.defaultVariables ?? '',
+});
+
+const fromImport = (imported: ReaderPresetImport, name: string): Draft => ({
+  id: null,
+  name,
+  main: imported.main,
+  globalNote: imported.globalNote,
+  jailbreak: imported.jailbreak,
+  formatingOrder: imported.formatingOrder,
+  promptTemplate: imported.promptTemplate,
+  groupTemplate: imported.groupTemplate,
+  groupOtherBotRole: imported.groupOtherBotRole,
+  toggles: imported.toggles,
+  moduleIntegration: imported.moduleIntegration,
+  defaultVariables: imported.defaultVariables,
+  imported,
+});
+
 /**
- * "내 프리셋": the reader's own presets on top of the chat's (§11) — pick one for
- * this chat, and behind one quiet button, make, change, delete and import them,
- * in the column of the chat's settings sheet.
+ * "내 프리셋": the reader's own presets (§11), one of which replaces the built-in
+ * default on a chat that picks it — pick one for this chat, and behind one quiet
+ * button, make, change, delete and import them, in the column of the chat's
+ * settings sheet.
  */
 export function ReaderPresetField({
   presets,
@@ -142,16 +187,7 @@ function ReaderPresetManager({
     setError('');
     try {
       const imported = await readReaderPresetFile(file.name, new Uint8Array(await file.arrayBuffer()));
-      setDraft({
-        id: null,
-        name: imported.name || t('importedName'),
-        main: imported.main,
-        globalNote: imported.globalNote,
-        toggles: imported.toggles,
-        moduleIntegration: imported.moduleIntegration,
-        defaultVariables: imported.defaultVariables,
-        imported,
-      });
+      setDraft(fromImport(imported, imported.name || t('importedName')));
     } catch (caught) {
       setError(
         caught instanceof ReaderPresetImportError && caught.reason === 'unsupported'
@@ -169,6 +205,11 @@ function ReaderPresetManager({
       name: draft.name,
       main: draft.main,
       globalNote: draft.globalNote,
+      jailbreak: draft.jailbreak,
+      formatingOrder: draft.formatingOrder,
+      promptTemplate: draft.promptTemplate,
+      groupTemplate: draft.groupTemplate,
+      groupOtherBotRole: draft.groupOtherBotRole,
       toggles: draft.toggles,
       moduleIntegration: draft.moduleIntegration,
       defaultVariables: draft.defaultVariables,
@@ -217,20 +258,38 @@ function ReaderPresetManager({
               onChange={(event) => setDraft({ ...draft, name: event.target.value })}
             />
           </Field>
-          <TextField
-            label={t('main')}
-            hint={t('mainHint')}
-            value={draft.main}
-            rows={5}
-            onChange={(main) => setDraft({ ...draft, main })}
-          />
-          <TextField
-            label={t('globalNote')}
-            hint={t('globalNoteHint')}
-            value={draft.globalNote}
-            rows={4}
-            onChange={(globalNote) => setDraft({ ...draft, globalNote })}
-          />
+          {draft.promptTemplate ? (
+            <TemplateItems
+              items={draft.promptTemplate}
+              onChange={(promptTemplate) => setDraft({ ...draft, promptTemplate })}
+            />
+          ) : (
+            <>
+              {/* RisuAI's three texts, sent in the preset's order where it has no template. */}
+              <p className="text-xs text-muted">{t('legacyHint')}</p>
+              <TextField
+                label={t('main')}
+                hint={t('mainHint')}
+                value={draft.main}
+                rows={5}
+                onChange={(main) => setDraft({ ...draft, main })}
+              />
+              <TextField
+                label={t('jailbreak')}
+                hint={t('jailbreakHint')}
+                value={draft.jailbreak}
+                rows={4}
+                onChange={(jailbreak) => setDraft({ ...draft, jailbreak })}
+              />
+              <TextField
+                label={t('globalNote')}
+                hint={t('globalNoteHint')}
+                value={draft.globalNote}
+                rows={4}
+                onChange={(globalNote) => setDraft({ ...draft, globalNote })}
+              />
+            </>
+          )}
           <TextField
             label={t('toggles')}
             hint={t('togglesHint')}
@@ -283,17 +342,7 @@ function ReaderPresetManager({
                     variant="ghost"
                     disabled={busy}
                     aria-label={t('editNamed', { name: preset.name })}
-                    onClick={() =>
-                      setDraft({
-                        id: preset.id,
-                        name: preset.name,
-                        main: preset.main,
-                        globalNote: preset.globalNote,
-                        toggles: preset.toggles ?? '',
-                        moduleIntegration: preset.moduleIntegration ?? '',
-                        defaultVariables: preset.defaultVariables ?? '',
-                      })
-                    }
+                    onClick={() => setDraft(fromRow(preset))}
                   >
                     {common('edit')}
                   </Button>
@@ -311,13 +360,7 @@ function ReaderPresetManager({
             </ul>
           ) : null}
           <div className="flex flex-wrap gap-2">
-            <Button
-              size="sm"
-              disabled={busy}
-              onClick={() =>
-                setDraft({ id: null, name: '', main: '', globalNote: '', toggles: '', moduleIntegration: '', defaultVariables: '' })
-              }
-            >
+            <Button size="sm" disabled={busy} onClick={() => setDraft(newDraft(t('newName')))}>
               {t('new')}
             </Button>
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => fileInput.current?.click()}>
@@ -344,6 +387,89 @@ function ReaderPresetManager({
   );
 }
 
+/**
+ * A prompt template's items in its order, as RisuAI sends them: what each is —
+ * its type, name, role, the stretch of the chat it sends — read only, and the
+ * text of a preset's own item or the inner format a block of the chat is
+ * wrapped in, which the reader may change. Items are not added, removed or
+ * moved here.
+ */
+function TemplateItems({
+  items,
+  onChange,
+}: {
+  items: PromptTemplateItem[];
+  onChange: (items: PromptTemplateItem[]) => void;
+}) {
+  const t = useTranslations('chat.readerPresets');
+  const set = (at: number, item: PromptTemplateItem) =>
+    onChange(items.map((other, index) => (index === at ? item : other)));
+
+  /** What an item is, in one line: type, the slot it stands for, name, role, range. */
+  const describe = (item: PromptTemplateItem): string =>
+    [
+      t(`itemTypes.${item.type}`),
+      'type2' in item && item.type2 !== 'normal' ? t(`itemSlots.${item.type2}`) : '',
+      item.name ?? '',
+      'role' in item && item.type !== 'cache'
+        ? t(`roles.${item.role}`)
+        : 'role2' in item && item.role2
+          ? t(`roles.${item.role2}`)
+          : '',
+      item.type === 'chat'
+        ? t('chatRange', {
+            start: String(item.rangeStart),
+            end: item.rangeEnd === 'end' ? t('rangeEnd') : String(item.rangeEnd),
+          })
+        : '',
+    ]
+      .filter((part) => part.length > 0)
+      .join(' · ');
+
+  return (
+    <div className="space-y-2">
+      <p className="text-xs font-semibold text-muted">{t('template')}</p>
+      <p className="text-xs text-muted">{t('templateHint')}</p>
+      <ol data-testid="reader-preset-template" className="space-y-2">
+        {/* The place keeps items apart: there is no id, and none moves. */}
+        {items.map((item, at) => (
+          <li key={at} className="rounded-lg bg-raised px-3 py-2">
+            {item.type === 'plain' || item.type === 'jailbreak' ? (
+              <TextField
+                label={describe(item)}
+                {...(item.type2 === 'globalNote' ? { hint: t('globalNoteHint') } : {})}
+                value={item.text}
+                rows={item.text.length > 200 ? 6 : 2}
+                onChange={(text) => set(at, { ...item, text })}
+              />
+            ) : item.type === 'persona' ||
+              item.type === 'description' ||
+              item.type === 'lorebook' ||
+              item.type === 'postEverything' ||
+              item.type === 'memory' ||
+              item.type === 'authornote' ? (
+              <TextField
+                label={describe(item)}
+                hint={t('innerFormatHint')}
+                value={item.innerFormat ?? ''}
+                rows={2}
+                mono
+                placeholder="{{slot}}"
+                onChange={(innerFormat) => set(at, { ...item, innerFormat })}
+              />
+            ) : (
+              <div className="space-y-1.5">
+                <p className="text-xs font-semibold text-muted">{describe(item)}</p>
+                {item.type === 'chat' ? null : <p className="text-xs text-muted">{t('notSent')}</p>}
+              </div>
+            )}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 /** A text of the preset, with how much of its cap it has used. */
 function TextField({
   label,
@@ -351,23 +477,26 @@ function TextField({
   value,
   rows,
   mono = false,
+  placeholder,
   onChange,
 }: {
   label: string;
-  hint: string;
+  hint?: string;
   value: string;
   rows: number;
   /** A text of RisuAI's syntax rather than prose. */
   mono?: boolean;
+  placeholder?: string;
   onChange: (value: string) => void;
 }) {
   const format = useFormatter();
   const over = value.length > READER_PRESET_TEXT_MAX;
   return (
-    <Field label={label} hint={hint}>
+    <Field label={label} {...(hint ? { hint } : {})}>
       <TextArea
         rows={rows}
         value={value}
+        {...(placeholder ? { placeholder } : {})}
         {...(mono ? { spellCheck: false } : {})}
         className={`w-full text-sm${mono ? ' font-mono' : ''}`}
         onChange={(event) => onChange(event.target.value)}
@@ -385,6 +514,7 @@ function ImportNotice({ imported }: { imported: ReaderPresetImport }) {
   const source = imported.source === 'risuai' ? 'RisuAI' : 'SillyTavern';
   const names = imported.ignoredPrompts.map((name) => name || t('unnamedPrompt'));
   /** A prompt by the file's name for it, else by what RisuAI calls its field. */
+  const template = imported.promptTemplate;
   const partName = (part: ReaderPresetPart): string =>
     part.name ||
     (part.kind === 'main'
@@ -395,6 +525,7 @@ function ImportNotice({ imported }: { imported: ReaderPresetImport }) {
           ? t('partJailbreak')
           : t('unnamedPrompt'));
   const lines = [
+    template ? t('tookTemplate', { count: template.length }) : '',
     ...imported.imported.map((part) => t('takenInto', { name: partName(part), field: t(part.into) })),
     imported.toggles.trim() ? t('tookToggles') : '',
     imported.moduleIntegration.trim() ? t('tookIntegration', { names: imported.moduleIntegration.trim() }) : '',
@@ -403,8 +534,8 @@ function ImportNotice({ imported }: { imported: ReaderPresetImport }) {
     imported.ignoredSettings ? t('ignoredSettings') : '',
   ].filter((line) => line.length > 0);
   const nothing =
-    !imported.main &&
-    !imported.globalNote &&
+    imported.imported.length === 0 &&
+    !template?.length &&
     !imported.toggles.trim() &&
     !imported.moduleIntegration.trim() &&
     !imported.defaultVariables.trim();

@@ -99,7 +99,7 @@ describe('runPromptScriptJob', () => {
     const scripted = history.map((turn, index) =>
       texts[index] === turn.content ? turn : { ...turn, promptContent: texts[index]! },
     );
-    const { messages } = assemblePrompt({
+    const { messages, sources } = assemblePrompt({
       plot: { name: '작품', description: '', lorebook: [] },
       characters: [
         {
@@ -127,9 +127,9 @@ describe('runPromptScriptJob', () => {
         },
       ],
       history: scripted,
-      preset: { main: 'MAIN', postHistory: 'POST' },
     });
-    expect(messages.map((message) => promptText(message.content))).toEqual(['어서 와. ', `${'e'.repeat(40)}f`, 'POST']);
+    const turns = messages.filter((_, at) => sources![at]!.kind === 'history');
+    expect(turns.map((message) => promptText(message.content))).toEqual(['어서 와. ', `${'e'.repeat(40)}f`]);
     expect(history).toEqual(stored);
   });
 });

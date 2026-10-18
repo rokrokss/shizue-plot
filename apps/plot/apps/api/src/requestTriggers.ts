@@ -384,32 +384,36 @@ const requestBlock = (turn: RequestTurn): PromptReportBlock => ({
 
 /**
  * The report with the request as it is sent: a turn the editors left as the
- * view had it keeps the blocks it stands for — the system string its sections
- * but the memory, the memory its section, a message its block, a separator or
- * a line of an example block that block's kind and name — and one they
- * rewrote, or RisuAI's `NewChat` separator, is one `request` block under the
- * role it went as. The totals stay the assembler's — the budget was spent
- * before the editors ran, and RisuAI does not measure their edit either.
+ * view had it keeps the blocks it stands for — a turn of the system string its
+ * sections (the memory's apart, as the assembler runs them together:
+ * `RisuPromptParts.system`), a message its block, a separator or a line of an
+ * example block that block's kind and name — and one they rewrote is one
+ * `request` block under the role it went as. The totals stay the assembler's —
+ * the budget was spent before the editors ran, and RisuAI does not measure
+ * their edit either.
  */
 function editedReport(report: PromptReport, messages: number, view: RisuRequestView, after: readonly RequestTurn[]): PromptReport {
   const sections = report.blocks.slice(0, report.blocks.length - messages);
   const turns = report.blocks.slice(report.blocks.length - messages);
+  // The system string's turns, as the assembler made them: a run of sections, the memory's alone.
+  const systemTurns: PromptReportBlock[][] = [];
+  for (const block of sections) {
+    const previous = systemTurns.at(-1);
+    if (previous && (previous[0]!.kind === 'memory') === (block.kind === 'memory')) previous.push(block);
+    else systemTurns.push([block]);
+  }
   const blocksOf = (index: number): PromptReportBlock[] => {
     const origin = view.origins[index]!;
     const item = view.items[index]!;
     switch (origin.kind) {
       case 'system':
-        return sections.filter((block) => block.kind !== 'memory');
-      case 'memory':
-        return sections.filter((block) => block.kind === 'memory');
+        return systemTurns[origin.at] ?? [requestBlock(item)];
       case 'message':
         return [turns[origin.at]!];
       case 'example': {
         const label = turns[origin.at]?.label;
         return [{ kind: 'examples', ...(label !== undefined ? { label } : {}), tokens: countTokens(item.content), text: item.content }];
       }
-      case 'newChat':
-        return [requestBlock(item)];
     }
   };
   return {

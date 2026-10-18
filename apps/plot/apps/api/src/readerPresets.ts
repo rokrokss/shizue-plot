@@ -1,13 +1,13 @@
 /**
- * Reader presets (docs/ARCHITECTURE.md §5, §6 프리셋): a reader's own additions
- * to the prompt preset — a main-instruction addition and a global note — kept on
- * the account and picked per chat (`chats.reader_preset_id`).
+ * Reader presets (docs/ARCHITECTURE.md §5, §6 프리셋): a reader's own prompt
+ * presets in RisuAI's shape, kept on the account and picked per chat
+ * (`chats.reader_preset_id`), where one replaces the built-in default.
  *
  * Only ever the reader's own text: a row holds what its owner wrote or imported,
  * nothing of any work, and every read is scoped by its owner — the chat's, when
  * a generation reads the one its chat points at.
  */
-import { presetDefaultVariables, type ReaderAdditions, type Variables } from '@shizue/core';
+import { presetDefaultVariables, readerPromptPreset, type PromptPreset, type Variables } from '@shizue/core';
 import { readerPresets, type Chat, type Plot, type ReaderPreset } from '@shizue/db';
 import { and, eq } from 'drizzle-orm';
 import type { AppDeps } from './deps.js';
@@ -34,23 +34,32 @@ export async function resolveReaderPresetId(deps: AppDeps, userId: string, value
 }
 
 /**
- * What a generation on this chat adds to its preset: the chat's reader preset,
- * read under the chat owner's id — a pointer at anyone else's row adds nothing.
+ * The prompt preset a generation on this chat runs in place of the built-in
+ * default: the chat's reader preset, read under the chat owner's id — a pointer
+ * at anyone else's row is no preset.
  */
-export async function loadReaderAdditions(deps: AppDeps, chat: Chat): Promise<ReaderAdditions | undefined> {
+export async function loadReaderPreset(deps: AppDeps, chat: Chat): Promise<PromptPreset | undefined> {
   if (!chat.readerPresetId) return undefined;
   const [preset] = await deps.db
-    .select({ main: readerPresets.main, globalNote: readerPresets.globalNote })
+    .select({
+      main: readerPresets.main,
+      globalNote: readerPresets.globalNote,
+      jailbreak: readerPresets.jailbreak,
+      formatingOrder: readerPresets.formatingOrder,
+      promptTemplate: readerPresets.promptTemplate,
+      groupTemplate: readerPresets.groupTemplate,
+      groupOtherBotRole: readerPresets.groupOtherBotRole,
+    })
     .from(readerPresets)
     .where(and(eq(readerPresets.id, chat.readerPresetId), eq(readerPresets.userId, chat.userId)))
     .limit(1);
-  return preset;
+  return preset ? readerPromptPreset(preset) : undefined;
 }
 
 /**
  * The variables a chat reads where nothing set one: its work's defaults, then
  * its reader preset's (RisuAI's `templateDefaultVariables`, `presetDefaultVariables`)
- * — the preset read under the chat owner's id, as `loadReaderAdditions` reads it.
+ * — the preset read under the chat owner's id, as `loadReaderPreset` reads it.
  */
 export async function chatDefaultVariables(
   deps: AppDeps,

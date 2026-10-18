@@ -11,7 +11,7 @@ import {
 } from '@shizue/core/translation';
 import { useTranslations } from 'next-intl';
 import { useId, type ReactNode } from 'react';
-import type { ModelInfo, Persona, PresetInfo, ReaderPreset } from '@/lib/types';
+import type { ModelInfo, Persona, ReaderPreset } from '@/lib/types';
 import { PersonaFace } from './Avatar';
 import { ModelOptions } from './ModelOptions';
 import { ReaderPresetField } from './ReaderPresets';
@@ -34,8 +34,9 @@ const KNOWN_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
 
 /**
  * The choices a chat is run with: model, reasoning effort where the model offers
- * one, auxiliary model, preset, the reader's own preset on top of it, and
- * persona — labelled rows at full width, in the chat's settings sheet.
+ * one, auxiliary model, the reader's own preset in place of the built-in
+ * default, and persona — labelled rows at full width, in the chat's settings
+ * sheet.
  *
  * The caption is a `<label htmlFor>`: pointed at the control by id rather than
  * wrapping it, because wrapping would put every option's text into the
@@ -47,10 +48,8 @@ export function ChatSettings({
   model,
   subModel,
   reasoningEffort,
-  preset,
   personaId,
   models,
-  presets,
   personas,
   readerPresetId = null,
   readerPresets,
@@ -64,12 +63,10 @@ export function ChatSettings({
   /** The auxiliary model the reader picked; null runs the side work on the first model. */
   subModel: string | null;
   reasoningEffort: string | null;
-  preset: string;
   personaId: string | null;
   models: ModelInfo[];
-  presets: PresetInfo[];
   personas: Persona[];
-  /** This chat's reader preset ("내 프리셋"); null adds nothing. */
+  /** This chat's reader preset ("내 프리셋"); null runs the built-in default. */
   readerPresetId?: string | null;
   /** The reader's own presets. Without them the "내 프리셋" control is not drawn. */
   readerPresets?: ReaderPreset[];
@@ -83,7 +80,6 @@ export function ChatSettings({
     model?: string;
     subModel?: string | null;
     reasoningEffort?: string | null;
-    preset?: string;
     readerPresetId?: string | null;
     personaId?: string | null;
     translation?: ChatTranslationSettings;
@@ -191,28 +187,7 @@ export function ChatSettings({
         </Select>,
         t('subModelHint'),
       )}
-      {field(
-        'preset',
-        t('preset'),
-        <Select
-          value={preset}
-          disabled={disabled}
-          title={locked ?? t(`presetHints.${preset}`)}
-          {...nameOf('preset')}
-          onChange={(event) => onChange({ preset: event.target.value })}
-        >
-          {/* Keeps the current preset selected while the catalogue is loading. */}
-          {presets.some((entry) => entry.id === preset) ? null : (
-            <option value={preset}>{t(`presets.${preset}`)}</option>
-          )}
-          {presets.map((entry) => (
-            <option key={entry.id} value={entry.id} title={t(`presetHints.${entry.id}`)}>
-              {t(`presets.${entry.id}`)}
-            </option>
-          ))}
-        </Select>,
-      )}
-      {/* The reader's own additions on top of the preset just above. */}
+      {/* The reader's own preset, which replaces the built-in default. */}
       {readerPresets && onReaderPresetsChange ? (
         <ReaderPresetField
           presets={readerPresets}

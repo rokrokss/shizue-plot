@@ -18,6 +18,7 @@ export * from './emotion.js';
 export * from './scene.js';
 export * from './tokens.js';
 export * from './language.js';
+export * from './oai2.js';
 export * from './presets.js';
 export * from './readerPreset.js';
 export * from './toggles.js';

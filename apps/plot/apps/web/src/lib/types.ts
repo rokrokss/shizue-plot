@@ -7,6 +7,8 @@ import type {
   EmotionImage,
   EmotionMode,
   EmotionProcessor,
+  FormatOrderItem,
+  GroupOtherBotRole,
   GroupSettings,
   HypaV3Settings,
   ImportProvenance,
@@ -27,6 +29,7 @@ import type {
   PlotTense,
   PromptBlockKind,
   PromptReport,
+  PromptTemplateItem,
   StorytellingStyle,
   VariableDelta,
   Variables,
@@ -477,15 +480,6 @@ export interface ModelInfo {
   defaultReasoningEffort?: string;
 }
 
-export interface PresetInfo {
-  id: string;
-}
-
-/**
- * The reader's own preset (`GET /api/reader-presets`): what they add on top of
- * the chat's preset — a main-instruction addition and a global note. Account-level,
- * picked per chat.
- */
 /**
  * A module in the reader's own library (`/api/reader-modules`), as they list it:
  * what it is and what it brought, not its scripts.
@@ -543,11 +537,25 @@ export interface ChatModulesView {
   hideIcons?: boolean;
 }
 
+/**
+ * The reader's own preset (`GET /api/reader-presets`): RisuAI's `botPreset`, the
+ * fields that make the prompt. Account-level, picked per chat, where it replaces
+ * the built-in default (`DEFAULT_PRESET`) as picking a preset does in PocketRisu.
+ */
 export interface ReaderPreset {
   id: string;
   name: string;
+  /** RisuAI's `mainPrompt`. Like the jailbreak and the global note, read only without a template. */
   main: string;
   globalNote: string;
+  jailbreak: string;
+  /** RisuAI's `formatingOrder`; null for its default order. */
+  formatingOrder: FormatOrderItem[] | null;
+  /** RisuAI's prompt template; when there is one it is the prompt, and the three texts and the order are not read. */
+  promptTemplate: PromptTemplateItem[] | null;
+  /** RisuAI's `groupTemplate`; '' for its default. */
+  groupTemplate: string;
+  groupOtherBotRole: GroupOtherBotRole;
   /** RisuAI's preset toggles (`customPromptTemplateToggle`), drawn first among a chat's toggles. */
   toggles: string;
   /** RisuAI's `moduleIntergration`: namespaces whose library modules a chat on it turns on. */
@@ -663,9 +671,9 @@ export interface Chat {
    * reason; absent is off.
    */
   retrieval?: { enabled: boolean };
-  /** Prompt preset id, one of the ids GET /api/presets lists. */
+  /** Built-in prompt preset id; `default` is the only one, which a reader preset replaces. */
   preset: string;
-  /** The reader's own preset on top of `preset`; null adds nothing. */
+  /** The reader's own preset, which replaces the built-in default; null runs the default. */
   readerPresetId: string | null;
   headMessageId: string | null;
   /** Moves with every edit, hide and delete of a message — what may drop one of the memory's summaries. */

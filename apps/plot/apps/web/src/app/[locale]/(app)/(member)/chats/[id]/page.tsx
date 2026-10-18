@@ -122,7 +122,6 @@ import type {
   ModelInfo,
   NarratorConfig,
   Persona,
-  PresetInfo,
   ReaderPreset,
   PublicMember,
   PublicPlotDetail,
@@ -372,7 +371,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    */
   const [chatModules, setChatModules] = useState<ChatModulesView | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [presets, setPresets] = useState<PresetInfo[]>([]);
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [readerPresets, setReaderPresets] = useState<ReaderPreset[]>([]);
   const [notes, setNotes] = useState<UserNote[]>([]);
@@ -652,7 +650,6 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   useEffect(() => {
     apiGet<ChatState>(`/api/chats/${id}`).then(applyState, () => setMissing(true));
     apiGet<ModelInfo[]>('/api/models').then(setModels, () => undefined);
-    apiGet<PresetInfo[]>('/api/presets').then(setPresets, () => undefined);
     apiGet<Persona[]>('/api/personas').then(setPersonas, () => undefined);
     apiGet<ReaderPreset[]>('/api/reader-presets').then(setReaderPresets, () => undefined);
     apiGet<UserNote[]>('/api/notes').then(setNotes, () => undefined);
@@ -2665,8 +2662,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     reasoningEffort?: string | null;
     personaId?: string | null;
     note?: string;
-    preset?: string;
-    /** The reader's own preset on top of `preset`; null picks none. */
+    /** The reader's own preset in place of the built-in default; null runs the default. */
     readerPresetId?: string | null;
     /** How a reply's emotion picture is chosen. */
     emotionProcessor?: EmotionProcessor;
@@ -3705,10 +3701,8 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             model={state.chat.model}
             subModel={state.chat.subModel}
             reasoningEffort={state.chat.reasoningEffort}
-            preset={state.chat.preset}
             personaId={state.chat.personaId}
             models={models}
-            presets={presets}
             personas={personas}
             readerPresetId={state.chat.readerPresetId}
             readerPresets={readerPresets}

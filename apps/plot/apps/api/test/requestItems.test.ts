@@ -10,6 +10,8 @@ import {
   countTokens,
   DEFAULT_LORE_SETTINGS,
   IMAGE_TOKEN_ESTIMATE,
+  OAI_JAILBREAK,
+  SPEECH_PROTOCOL_REMINDER,
   type AssembledPrompt,
   type LoreEntry,
   type PromptCharacter,
@@ -61,6 +63,8 @@ const keyed: LoreEntry = {
   position: 'before_char',
 };
 const gif = 'data:image/gif;base64,R0lGODlhAQ==';
+/** The memory's turn, as the default preset's `memory` item wraps the summary. */
+const MEMORY_TURN = '[Roleplay Summary]\n[Summary of the story so far]\n둘은 만났다.\n';
 const png = 'data:image/png;base64,iVBORw0K';
 
 /** A chat of a greeting and one turn of the reader's carrying `images`, with the memory's summary. */
@@ -109,9 +113,12 @@ describe('the request the editors read, and what goes back', () => {
     const { sent, seen } = await edited(prompt, (items) =>
       items.map((item) => (item.role === 'user' && item.memo === 'm-1' ? { ...item, content: '이것 좀 봐' } : item)),
     );
+    // The system string is three of RisuAI's turns — the default preset's `memory` item sits among its
+    // system items, its own turn — and what follows the chat is the protocol's reminder and the jailbreak.
     expect(seen.map(({ role, memo, name }) => [role, memo ?? null, name ?? null])).toEqual([
       ['system', null, null],
       ['system', 'supaMemory', null],
+      ['system', null, null],
       ['system', 'NewChatExample', null],
       ['user', null, 'example_user'],
       ['assistant', null, 'example_assistant'],
@@ -119,18 +126,22 @@ describe('the request the editors read, and what goes back', () => {
       ['assistant', null, null],
       ['user', 'm-1', null],
       ['system', null, null],
+      ['system', null, null],
     ]);
+    expect(seen[1]!.content).toBe(MEMORY_TURN);
     expect(sent.system).toBe(seen[0]!.content);
     expect(sent.system).not.toContain('둘은 만났다.');
     expect(sent.messages).toEqual([
-      { role: 'system', content: '[Summary of the story so far]\n둘은 만났다.' },
+      { role: 'system', content: MEMORY_TURN },
+      seen[2],
       { role: 'system', content: '[Start a new chat]' },
       { role: 'user', content: '예시 질문' },
       { role: 'assistant', content: '예시 답변' },
       { role: 'system', content: '[Start a new chat]' },
       { role: 'assistant', content: '어서 와.' },
       { role: 'user', content: '이것 좀 봐' },
-      seen.at(-1),
+      { role: 'system', content: SPEECH_PROTOCOL_REMINDER },
+      { role: 'system', content: OAI_JAILBREAK },
     ]);
     expect(sent.sources).toBeUndefined();
     expect(sent.risu).toBeUndefined();
@@ -189,7 +200,7 @@ describe('the request the editors read, and what goes back', () => {
     expect(memory.sent.messages[0]).toEqual({
       role: 'system',
       content: [
-        { type: 'text', text: '[Summary of the story so far]\n둘은 만났다.' },
+        { type: 'text', text: MEMORY_TURN },
         { type: 'image', url: gif },
         { type: 'image', url: png },
       ],
@@ -235,7 +246,7 @@ describe('the request the editors read, and what goes back', () => {
     expect(sent.messages.at(-1)).toEqual({ role: 'user', content: [{ type: 'text', text: '둘째만' }, { type: 'image', url: png }] });
   });
 
-  it('hands the editors the keyword lore as a system item of its own, right after the reader’s turn', async () => {
+  it('hands the editors the keyword lore as a system item of its own, after the reader’s turn and the protocol’s reminder', async () => {
     const lore = { ...aria, card: { ...aria.card, lorebook: [{ ...keyed, content: '등대는 북쪽 끝에 있다.' }] } };
     const prompt = assemblePrompt({
       plot: { name: '골짜기', description: '여관.', lorebook: [] },
@@ -249,17 +260,19 @@ describe('the request the editors read, and what goes back', () => {
     });
     const { seen, sent } = await edited(prompt, (items) =>
       items.map((item, at) =>
-        item.content === '등대는 북쪽 끝에 있다.' ? { ...item, content: `${item.content} (앞: ${items[at - 1]!.memo})` } : item,
+        item.content === '등대는 북쪽 끝에 있다.' ? { ...item, content: `${item.content} (앞: ${items[at - 2]!.memo})` } : item,
       ),
     );
     const at = seen.findIndex((item) => item.content === '등대는 북쪽 끝에 있다.');
     // Not in the system string: a turn as RisuAI's own system turns are, no memo, never removable.
     expect(seen[0]!.content).not.toContain('등대는');
     expect(seen[at]).toEqual({ role: 'system', content: '등대는 북쪽 끝에 있다.' });
-    expect(seen[at - 1]).toMatchObject({ role: 'user', memo: 'm-1' });
-    expect(seen[at + 1]!.role).toBe('system');
+    // What follows the chat opens on the protocol's reminder, then the lore — after the reader's turn.
+    expect(seen[at - 1]).toEqual({ role: 'system', content: SPEECH_PROTOCOL_REMINDER });
+    expect(seen[at - 2]).toMatchObject({ role: 'user', memo: 'm-1' });
+    expect(seen[at + 1]).toEqual({ role: 'system', content: OAI_JAILBREAK });
     // What the editor made of it goes out in its place.
-    expect(sent.messages[sent.messages.findIndex((message) => message.content === '등대로 가자') + 1]).toEqual({
+    expect(sent.messages[sent.messages.findIndex((message) => message.content === '등대로 가자') + 2]).toEqual({
       role: 'system',
       content: '등대는 북쪽 끝에 있다. (앞: m-1)',
     });
@@ -268,19 +281,27 @@ describe('the request the editors read, and what goes back', () => {
   it('reports the edited request by what each turn stands for', async () => {
     const prompt = promptWith([], true);
     const { sent } = await edited(prompt, (items) => items.map((item) => (item.memo === 'm-1' ? { ...item, content: '바뀜' } : item)));
+    const sections = prompt.report!.blocks.slice(0, prompt.report!.blocks.length - prompt.messages.length);
+    // The memory is one of the system string's sections, the turn of its own in the middle of them.
+    expect(sections.map((block) => block.kind)).toEqual([
+      'main',
+      'description',
+      'preset',
+      'memory',
+      'preset',
+      'speech_protocol',
+      'narration_note',
+    ]);
     expect(sent.report!.blocks.map((block) => [block.kind, block.label ?? null, block.text])).toEqual([
-      ...prompt.report!.blocks
-        .slice(0, prompt.report!.blocks.length - prompt.messages.length)
-        .filter((block) => block.kind !== 'memory')
-        .map((block) => [block.kind, block.label ?? null, block.text]),
-      ['memory', null, '[Summary of the story so far]\n둘은 만났다.'],
+      ...sections.map((block) => [block.kind, block.label ?? null, block.text]),
       ['examples', '아리아', '[Start a new chat]'],
       ['examples', '아리아', '예시 질문'],
       ['examples', '아리아', '예시 답변'],
-      ['request', 'system', '[Start a new chat]'],
+      ['new_chat', null, '[Start a new chat]'],
       ['history', 'assistant', '어서 와.'],
       ['request', 'user', '바뀜'],
-      ['post_history', null, sent.messages.at(-1)!.content],
+      ['speech_protocol', null, SPEECH_PROTOCOL_REMINDER],
+      ['preset', null, OAI_JAILBREAK],
     ]);
     expect(sent.report!.totals).toEqual(prompt.report!.totals);
   });

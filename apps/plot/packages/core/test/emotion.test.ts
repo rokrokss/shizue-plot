@@ -65,17 +65,20 @@ describe('inlay emotion screen', () => {
     const plain = { name: '카이', id: 'b', card: emptyCard('카이') };
     const plot = { name: '작품', description: '', lorebook: [] };
     const history = [{ role: 'user' as const, content: '안녕' }];
-    const last = (input: Parameters<typeof assemblePrompt>[0]) => assemblePrompt(input).messages.at(-1)!;
+    const texts = (input: Parameters<typeof assemblePrompt>[0]) =>
+      assemblePrompt(input).messages.map((message) => String(message.content));
+    const emotion = (sent: string[]) => sent.findIndex((text) => text.includes('List of commands'));
 
-    expect(last({ plot, characters: [inlay], history }).content).toContain('List of commands: neutral, happy, Angry');
-    // A group turn: the speaker's card decides, and the speaker line stays last.
-    const asSpeaker = assemblePrompt({ plot, characters: [plain, inlay], history, speaker: 1 }).messages;
-    expect(asSpeaker.at(-2)!.content).toContain('List of commands');
-    expect(assemblePrompt({ plot, characters: [inlay, plain], history, speaker: 1 }).messages.some((message) =>
-      String(message.content).includes('List of commands'),
-    )).toBe(false);
+    // After the newest turn, with what follows the chat (RisuAI's `postEverything`).
+    const alone = texts({ plot, characters: [inlay], history });
+    expect(alone[emotion(alone)]).toContain('List of commands: neutral, happy, Angry');
+    expect(emotion(alone)).toBeGreaterThan(alone.indexOf('안녕'));
+    // A group turn: the speaker's card decides, and the speaker line follows it.
+    const asSpeaker = texts({ plot, characters: [plain, inlay], history, speaker: 1 });
+    expect(asSpeaker[emotion(asSpeaker) + 1]).toBe('[Write the next reply only as 세이]');
+    expect(emotion(texts({ plot, characters: [inlay, plain], history, speaker: 1 }))).toBe(-1);
     // A scene reply in a work of several is no one member's.
-    expect(String(last({ plot, characters: [inlay, plain], history }).content)).not.toContain('List of commands');
+    expect(emotion(texts({ plot, characters: [inlay, plain], history }))).toBe(-1);
   });
 
   it("turns the model's tags into the picture, each on a line of its own", () => {

@@ -2094,12 +2094,14 @@ describe('normalizeCard - a RisuAI book', () => {
         ],
       }),
     );
-    const { messages } = assemblePrompt({
+    const { system, messages } = assemblePrompt({
       plot: { name: '이야기', description: '', lorebook: [] },
       characters: [{ name: card.name, card }],
       history: [{ role: 'user', content: '마왕성으로 간다' }],
     });
-    // A keyword entry goes right after the newest turn (the moved lore).
-    expect(messages[1]).toEqual({ role: 'system', content: '마왕성은 북쪽 끝에 있다.' });
+    // A keyword entry goes after the newest turn (the moved lore), out of the system string.
+    const newest = messages.findIndex((message) => message.content === '마왕성으로 간다');
+    expect(messages.slice(newest + 1)).toContainEqual({ role: 'system', content: '마왕성은 북쪽 끝에 있다.' });
+    expect(system).not.toContain('마왕성은');
   });
 });

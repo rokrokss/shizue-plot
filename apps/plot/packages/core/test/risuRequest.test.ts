@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { assemblePrompt, promptText, type HistoryMessage, type PromptCharacter, type PromptPlot } from '../src/prompt.js';
+import { RISU_DEFAULT_FORMATING_ORDER, SPEECH_PROTOCOL_REMINDER, type PromptPreset } from '../src/presets.js';
+import { assemblePrompt, type HistoryMessage, type PromptCharacter, type PromptPlot } from '../src/prompt.js';
 import { RISU_NEW_CHAT, RISU_REQUEST_ITEMS, risuExampleSides, risuRequestExtras, risuRequestView } from '../src/risuRequest.js';
 import { DEFAULT_LORE_SETTINGS, type NormalizedCard } from '../src/types.js';
 
@@ -39,30 +40,41 @@ const card: NormalizedCard = {
 };
 const plot: PromptPlot = { name: '골짜기', description: '여관.', lorebook: [] };
 const aria: PromptCharacter = { name: '아리아', card };
+/** RisuAI's preset without a template, in its default order — its request as `sendChat` sends one by default. */
+const preset: PromptPreset = {
+  mainPrompt: 'MAIN',
+  jailbreak: '',
+  globalNote: 'POST',
+  formatingOrder: RISU_DEFAULT_FORMATING_ORDER,
+  promptTemplate: null,
+  groupTemplate: '',
+  groupOtherBotRole: 'user',
+};
 
 describe('the request as RisuAI’s items', () => {
   it('marks our blocks as sendChat marks the turns they stand for, and invents no memo', () => {
     expect(RISU_REQUEST_ITEMS).toEqual({
       main: {},
-      format: {},
+      preset: {},
+      speech_protocol: {},
       narration_note: {},
       lore_before: {},
-      plot: {},
-      character: {},
-      absent_cast: {},
+      description: {},
       narrator: {},
       style: {},
       lore_after: {},
+      lorebook: {},
       persona: {},
       memory: { memo: 'supaMemory' },
       directions: {},
       examples: { memo: 'NewChatExample', removable: true },
+      new_chat: { memo: 'NewChat', removable: true },
       history: { memo: 'chatId', removable: true, chat: true },
       depth_lore: {},
       author_note: {},
       moved_lore: {},
       recall: {},
-      post_history: {},
+      global_note: {},
       injection: {},
       trailing: {},
       request: {},
@@ -78,8 +90,9 @@ describe('the request as RisuAI’s items', () => {
     });
     expect(risuRequestExtras({ kind: 'history', id: 'm-0', greeting: true })).toEqual({ removable: true });
     expect(risuRequestExtras({ kind: 'examples' })).toEqual({ memo: 'NewChatExample', removable: true });
+    expect(risuRequestExtras({ kind: 'new_chat' })).toEqual({ memo: 'NewChat', removable: true });
     expect(risuRequestExtras({ kind: 'memory' })).toEqual({ memo: 'supaMemory' });
-    for (const kind of ['directions', 'depth_lore', 'author_note', 'post_history', 'injection', 'trailing'] as const) {
+    for (const kind of ['directions', 'depth_lore', 'author_note', 'global_note', 'lorebook', 'injection', 'trailing'] as const) {
       expect(risuRequestExtras({ kind }), kind).toEqual({});
     }
     expect(risuRequestExtras(undefined)).toEqual({});
@@ -100,32 +113,39 @@ describe('the request as RisuAI’s items', () => {
       authorNote: '긴장',
       directions: '문이 열린다.',
       branch: { length: 4, greeting: { text: '어서 와.', index: -1 } },
+      preset,
     });
     expect(prompt.sources).toHaveLength(prompt.messages.length);
+    // RisuAI's default order: the chat, its newest turn, then the global note and the
+    // author's note — and what follows everything, ours among it.
     expect(prompt.sources).toEqual([
       { kind: 'examples', speakers: { user: '민준', char: ['아리아', '아리아'] } },
-      { kind: 'author_note' },
+      { kind: 'new_chat' },
       { kind: 'history', id: 'greeting', greeting: true },
       { kind: 'history', id: 'm-1' },
       { kind: 'history', id: 'm-2' },
       { kind: 'depth_lore' },
       { kind: 'history', id: 'm-3' },
+      { kind: 'global_note' },
+      { kind: 'author_note' },
+      { kind: 'speech_protocol' },
       { kind: 'directions' },
-      { kind: 'post_history' },
     ]);
 
-    // Where the memory trimmed the front, the first turn kept is no greeting.
+    // Where the memory trimmed the front, the first turn kept is no greeting, and there is no separator.
     const trimmed = assemblePrompt({
       plot,
       characters: [aria],
       history: history.slice(2),
       userName: '민준',
       branch: { length: 4, greeting: { text: '어서 와.', index: -1 } },
+      preset,
     });
     expect(trimmed.sources!.filter((source) => source.kind === 'history')).toEqual([
       { kind: 'history', id: 'm-2' },
       { kind: 'history', id: 'm-3' },
     ]);
+    expect(trimmed.sources!.some((source) => source.kind === 'new_chat')).toBe(false);
   });
 
   it('splits an example block as RisuAI’s exampleMessage does, keeping what it would drop', () => {
@@ -163,7 +183,15 @@ describe('the request as RisuAI’s items', () => {
   const opening = { length: 4, greeting: { text: '어서 와.', index: -1 } };
 
   it('hands the editors the request in RisuAI’s shape: examples split and named, the separators, the newest turn not removable', () => {
-    const prompt = assemblePrompt({ plot, characters: [exampled], history: chat, userName: '민준', directions: '문이 열린다.', branch: opening });
+    const prompt = assemblePrompt({
+      plot,
+      characters: [exampled],
+      history: chat,
+      userName: '민준',
+      directions: '문이 열린다.',
+      branch: opening,
+      preset,
+    });
     const { items, origins } = risuRequestView(prompt);
     const separator = { role: 'system', content: RISU_NEW_CHAT, memo: 'NewChatExample', removable: true };
     expect(items).toEqual([
@@ -179,30 +207,26 @@ describe('the request as RisuAI’s items', () => {
       { role: 'assistant', content: '반가워', memo: 'm-2', removable: true, attr: [], thoughts: [] },
       // RisuAI's `lastChat`: the newest turn, sent without `removable`, its picture as its data URL.
       { role: 'user', content: '또 왔어', memo: 'm-3', attr: [], thoughts: [], multimodals: [{ type: 'image', base64: picture }] },
-      // Our directions, after the newest turn, then the post-history: each its own item.
+      // The global note, then what follows everything: each its own item.
+      { role: 'system', content: 'POST' },
+      { role: 'system', content: SPEECH_PROTOCOL_REMINDER },
       { role: 'system', content: '[Game ruling]\n문이 열린다.' },
-      { role: 'system', content: promptText(prompt.messages.at(-1)!.content) },
     ]);
     expect(origins).toEqual([
-      { kind: 'system' },
+      { kind: 'system', at: 0 },
       ...Array.from({ length: 3 }, () => ({ kind: 'example', at: 0 })),
       ...Array.from({ length: 2 }, () => ({ kind: 'example', at: 1 })),
-      { kind: 'newChat' },
-      ...[2, 3, 4, 5, 6, 7].map((at) => ({ kind: 'message', at })),
+      ...[2, 3, 4, 5, 6, 7, 8, 9].map((at) => ({ kind: 'message', at })),
     ]);
   });
 
-  it('sends the memory as its own supaMemory turn, and no NewChat once the chat’s front is gone', () => {
+  it('sends the memory as its own supaMemory turn — at the head of the chat without a memory item, among the system turns with one', () => {
     const memoryText = '[Summary of the story so far]\n둘은 여관에서 만났다.';
     // The memory evicted the front: the history the assembler gets starts past the greeting.
-    const remembered = assemblePrompt({ plot, characters: [aria], history: chat.slice(2), userName: '민준', memoryText, branch: opening });
-    expect(remembered.system).toContain('둘은 여관에서 만났다.');
-    expect(remembered.risu).toEqual({
-      memory: { text: memoryText, system: remembered.system.replace(`\n\n${memoryText}`, '') },
-      fromStart: false,
-    });
+    const remembered = assemblePrompt({ plot, characters: [aria], history: chat.slice(2), userName: '민준', memoryText, branch: opening, preset });
+    expect(remembered.system).not.toContain('둘은 여관에서 만났다.');
+    expect(remembered.risu).toEqual({ system: [{ text: remembered.system }] });
     const { items } = risuRequestView(remembered);
-    expect(items[0]).toEqual({ role: 'system', content: remembered.risu!.memory!.system });
     expect(items[1]).toEqual({ role: 'system', content: memoryText, memo: 'supaMemory' });
     expect(items.some((item) => item.memo === 'NewChat')).toBe(false);
     expect(items.filter((item) => item.memo?.startsWith('m-'))).toEqual([
@@ -210,36 +234,42 @@ describe('the request as RisuAI’s items', () => {
       { role: 'user', content: '또 왔어', memo: 'm-3', attr: [], thoughts: [], multimodals: [{ type: 'image', base64: picture }] },
     ]);
 
-    // Nor where the budget dropped the oldest turns.
+    // OAI2's memory item stands among its system items: the system string is three of RisuAI's turns.
+    const templated = assemblePrompt({ plot, characters: [aria], history: chat.slice(2), userName: '민준', memoryText, branch: opening });
+    expect(templated.risu!.template).toBe(true);
+    expect(templated.risu!.system.map((turn) => turn.memo ?? '')).toEqual(['', 'supaMemory', '']);
+    expect(templated.risu!.system[1]!.text).toBe(`[Roleplay Summary]\n${memoryText}\n`);
+    expect(templated.risu!.system.map((turn) => turn.text).join('\n\n')).toBe(templated.system);
+    const view = risuRequestView(templated);
+    expect(view.items.slice(0, 3).map((item) => item.memo)).toEqual([undefined, 'supaMemory', undefined]);
+    expect(view.origins.slice(0, 3)).toEqual([0, 1, 2].map((at) => ({ kind: 'system', at })));
+
+    // Nor a separator where the budget dropped the oldest turns.
     const long: HistoryMessage[] = [chat[0]!, { role: 'user', content: '긴 이야기 '.repeat(4000), id: 'm-1' }, ...chat.slice(2)];
-    const squeezed = assemblePrompt({ plot, characters: [aria], history: long, userName: '민준', branch: opening, contextBudget: 4000 });
+    const squeezed = assemblePrompt({ plot, characters: [aria], history: long, userName: '민준', branch: opening, contextBudget: 6000, preset });
     expect(squeezed.report).toBeUndefined();
     expect(squeezed.sources!.some((source) => source.greeting)).toBe(false);
-    expect(squeezed.risu).toEqual({ fromStart: false });
-    expect(assemblePrompt({ plot, characters: [aria], history: chat, userName: '민준', branch: opening }).risu).toEqual({ fromStart: true });
+    expect(squeezed.sources!.some((source) => source.kind === 'new_chat')).toBe(false);
+    expect(assemblePrompt({ plot, characters: [aria], history: chat, userName: '민준', branch: opening, preset }).sources).toContainEqual({
+      kind: 'new_chat',
+    });
   });
 
   it('keeps the supaMemory turn to the summaries, and hands the recall turn over after the newest turn as a plain system turn', () => {
     const memoryText = '[Summary of the story so far]\n둘은 여관에서 만났다.';
     const factsText = '[Memory]\n- 민준은 등대 열쇠를 갖고 있다.';
-    const prompt = assemblePrompt({ plot, characters: [aria], history: chat.slice(2), userName: '민준', memoryText, factsText, branch: opening });
-    expect(prompt.risu!.memory!.text).toBe(memoryText);
+    const prompt = assemblePrompt({ plot, characters: [aria], history: chat.slice(2), userName: '민준', memoryText, factsText, branch: opening, preset });
     const { items } = risuRequestView(prompt);
-    const at = items.findIndex((item) => item.content === factsText);
-    // Nothing of RisuAI's: no memo, never removable — after the newest turn, which
-    // is still `lastChat` behind the card's depth lore, and before the post-history.
-    expect(items[at]).toEqual({ role: 'system', content: factsText });
-    expect(items[at - 2]).toEqual({ role: 'system', content: '깊은 곳의 이야기' });
-    expect(items[at - 1]).toEqual({
-      role: 'user',
-      content: '또 왔어',
-      memo: 'm-3',
-      attr: [],
-      thoughts: [],
-      multimodals: [{ type: 'image', base64: picture }],
-    });
-    expect(items[at + 1]).toEqual({ role: 'system', content: promptText(prompt.messages.at(-1)!.content) });
-    expect(at + 2).toBe(items.length);
+    const newest = items.findIndex((item) => item.memo === 'm-3');
+    // The card's depth lore is spliced in ahead of the newest turn, which is still `lastChat`.
+    expect(items[newest - 1]).toEqual({ role: 'system', content: '깊은 곳의 이야기' });
+    // Nothing of RisuAI's on the recall turn: no memo, never removable — with what follows everything.
+    expect(items.slice(newest + 1)).toEqual([
+      { role: 'system', content: 'POST' },
+      { role: 'system', content: SPEECH_PROTOCOL_REMINDER },
+      { role: 'system', content: factsText },
+    ]);
+    expect(items.find((item) => item.memo === 'supaMemory')?.content).toBe(memoryText);
   });
 });
 

@@ -1,34 +1,32 @@
 import { describe, expect, it } from 'vitest';
 import { withNarrationPrefix } from '../src/narration.js';
 import {
-  DEFAULT_MAIN_PRESET,
-  DEFAULT_POST_HISTORY_PRESET,
   DEFAULT_PRESET,
   getPreset,
   isPresetId,
   PRESET_IDS,
   PRESETS,
-  REPLY_FORMAT_HINT,
-  SPEECH_PROTOCOL,
+  RISU_DEFAULT_FORMATING_ORDER,
   SPEECH_PROTOCOL_REMINDER,
+  speechProtocol,
+  type PromptPreset,
 } from '../src/presets.js';
 import { loreEntryKey } from '../src/lorebook.js';
+import { OAI2_MAIN, OAI2_RESPONSE, OAI_JAILBREAK } from '../src/oai2.js';
 import {
-  absentCastLine,
   assemblePrompt,
   AUTHOR_NOTE_DEPTH,
-  characterHeader,
   constantLoreTokens,
   DEFAULT_CONTEXT_BUDGET,
   DEFAULT_USER_NAME,
-  exampleHeader,
   IMAGE_TOKEN_ESTIMATE,
   LORE_BUDGET_SHARE,
   NARRATION_HEADER,
   NARRATION_NOTE,
   NARRATOR_POV_LABELS,
+  NEW_CHAT_SEPARATOR,
   promptText,
-  plotHeader,
+  scenarioLine,
   STYLE_DIRECTIVES_HEADER,
   styleDirectives,
   withBranchGreeting,
@@ -47,15 +45,33 @@ import {
   type PlotStyle,
 } from '../src/types.js';
 
-const preset = { main: 'MAIN', postHistory: 'POST' };
+/**
+ * RisuAI's preset without a template, in its default order: the main prompt
+ * ahead of the description and the chat, the global note behind the newest
+ * turn — so a test reads 'MAIN' first and 'POST' after the chat.
+ */
+const legacyPreset = (mainPrompt: string, globalNote: string, extra: Partial<PromptPreset> = {}): PromptPreset => ({
+  mainPrompt,
+  jailbreak: '',
+  globalNote,
+  formatingOrder: RISU_DEFAULT_FORMATING_ORDER,
+  promptTemplate: null,
+  groupTemplate: '',
+  groupOtherBotRole: 'user',
+  ...extra,
+});
+const preset = legacyPreset('MAIN', 'POST');
+/** An example block as it is sent: RisuAI's `NewChatExample` separator, then the block. */
+const exampleBlock = (block: string): string => `${NEW_CHAT_SEPARATOR}\n${block}`;
 
 const card: NormalizedCard = {
   spec: 'v3',
   name: '아리아',
   description: '서리 골짜기의 마녀.',
   personality: '무뚝뚝하다.',
-  // Kept on the fixture on purpose: the assembler no longer reads it, because a
-  // situation belongs to the plot or to an intro rather than to one member.
+  // Kept on the fixture on purpose: the first member's scenario became the
+  // work's at import, so the assembler never reads it for her, while any later
+  // member brings it as their own circumstances (`ownScenario`).
   scenario: '눈보라 치는 밤.',
   firstMes: '',
   alternateGreetings: [],
@@ -80,8 +96,23 @@ const plot: PromptPlot = {
 
 const aria: PromptCharacter = { name: '아리아', card };
 
-const PLOT_BLOCK = `${plotHeader(plot.name)}\n${plot.description}`;
-const ARIA_BLOCK = `${characterHeader('아리아')}\n서리 골짜기의 마녀.\n\nDescription of 아리아: 무뚝뚝하다.`;
+/** Aria's description, RisuAI's: her card, her personality, and the work's setting as the circumstances. */
+const DESCRIPTION = `서리 골짜기의 마녀.\n\nDescription of 아리아: 무뚝뚝하다.\n\n${scenarioLine(plot.description)}`;
+/** The speech protocol a work of one member is taught, and its reminder after the chat. */
+const PROTOCOL = speechProtocol(['아리아']);
+const REMINDER = SPEECH_PROTOCOL_REMINDER;
+/** What closes the system string of a one-member, non-utility prompt. */
+const CLOSING = [PROTOCOL, NARRATION_NOTE];
+/** Aria's two example blocks as they are sent. */
+const EXAMPLES = [
+  exampleBlock('민준: 예시 질문 하나\n아리아: 예시 답변 하나'),
+  exampleBlock('민준: 예시 질문 둘\n아리아: 예시 답변 둘'),
+];
+/** What follows the newest turn on `preset` when nothing else comes: the global note, then the reminder. */
+const TAIL = ['POST', REMINDER];
+/** The texts a prompt sends as one kind of block, in order. */
+const sentAs = (prompt: ReturnType<typeof assemblePrompt>, kind: string): string[] =>
+  prompt.messages.flatMap((message, at) => (prompt.sources![at]!.kind === kind ? [promptText(message.content)] : []));
 
 const history: HistoryMessage[] = [
   { role: 'assistant', content: '첫 번째 인사말입니다.' },
@@ -102,24 +133,34 @@ const assemble = (contextBudget: number) =>
   });
 
 describe('assemblePrompt', () => {
-  it('builds the system prefix as plot then roster, with macros expanded', () => {
-    const { system } = assemble(100_000);
-    expect(system).toBe([('MAIN'), NARRATION_NOTE, PLOT_BLOCK, ARIA_BLOCK].join('\n\n'));
-    // The card's scenario is not read any more.
+  it("builds the system prefix as RisuAI's: the main prompt and the description, closed by the protocol and the narration note", () => {
+    const { system, systemSections, risu } = assemble(100_000);
+    expect(system).toBe(['MAIN', DESCRIPTION, ...CLOSING].join('\n\n'));
+    expect(systemSections!.map((section) => section.kind)).toEqual(['main', 'description', 'speech_protocol', 'narration_note']);
+    expect(risu).toEqual({ system: [{ text: system }] });
+    // The first member's own scenario is the work's now, and not read again.
     expect(system).not.toContain('눈보라 치는 밤');
   });
 
-  it('falls back to the built-in preset, which pins responses to the user language', () => {
-    const expand = (text: string): string =>
-      text.replaceAll('{{char}}', plot.name).replaceAll('{{user}}', DEFAULT_USER_NAME);
-    const { system, messages } = assemblePrompt({ plot, characters: [aria], history });
-    expect(system.startsWith(expand(DEFAULT_MAIN_PRESET))).toBe(true);
-    expect(messages.at(-1)!.content).toBe(expand(DEFAULT_POST_HISTORY_PRESET));
-    expect(DEFAULT_MAIN_PRESET).toContain('Always reply in the same language the user writes in.');
-    expect(DEFAULT_POST_HISTORY_PRESET).toContain('Reply in the language the user writes in.');
+  it("falls back to the built-in preset, PocketRisu's OAI2 template, which reads no card's system prompt", () => {
+    const { system, messages, risu } = assemblePrompt({ plot, characters: [aria], history });
+    expect(system.startsWith(OAI2_MAIN.replaceAll('{{user}}', DEFAULT_USER_NAME))).toBe(true);
+    expect(system).toContain(`[Roleplay Setting]\n${DESCRIPTION}\n`);
+    expect(system).toContain(OAI2_RESPONSE);
+    expect(system.endsWith(CLOSING.join('\n\n'))).toBe(true);
+    // The reminder after the chat, then the OAI preset's jailbreak after everything; the
+    // prefill item asks for a model that takes one, and this request names none.
+    expect(messages.slice(-2)).toEqual([
+      { role: 'system', content: REMINDER },
+      { role: 'system', content: OAI_JAILBREAK },
+    ]);
+    expect(risu!.template).toBe(true);
+    // RisuAI reads no card's system prompt under a template.
+    const own = assemblePrompt({ plot, characters: [{ ...aria, card: { ...card, systemPrompt: '카드의 규칙.' } }], history });
+    expect(own.system).toBe(system);
   });
 
-  it('writes one block per roster member, in the order it was given', () => {
+  it('writes one description per roster member, in the order it was given, and the setting once after them', () => {
     const minsu: PromptCharacter = {
       name: '민수',
       card: { ...card, name: '민수 카드', description: '여관 주인.', personality: '', mesExample: '' },
@@ -132,12 +173,15 @@ describe('assemblePrompt', () => {
       userName: '민준',
     });
     expect(system).toBe(
-      ['MAIN', NARRATION_NOTE, PLOT_BLOCK, ARIA_BLOCK, `${characterHeader('민수')}\n여관 주인.`].join(
-        '\n\n',
-      ),
-    );
-    expect(system.indexOf(characterHeader('아리아'))).toBeLessThan(
-      system.indexOf(characterHeader('민수')),
+      [
+        'MAIN',
+        '[아리아]\n\n서리 골짜기의 마녀.\n\nDescription of 아리아: 무뚝뚝하다.',
+        // A member after the first brings their card's scenario as their own circumstances.
+        `[민수]\n\n여관 주인.\n\n${scenarioLine('눈보라 치는 밤.')}`,
+        scenarioLine(plot.description),
+        speechProtocol(['아리아', '민수']),
+        NARRATION_NOTE,
+      ].join('\n\n'),
     );
   });
 
@@ -149,32 +193,37 @@ describe('assemblePrompt', () => {
       preset,
       userName: '민준',
     });
-    expect(system).toBe(['MAIN', NARRATION_NOTE, PLOT_BLOCK].join('\n\n'));
+    expect(system).toBe(['MAIN', scenarioLine(plot.description), speechProtocol([]), NARRATION_NOTE].join('\n\n'));
     expect(messages.map((message) => message.content)).toEqual([
+      NEW_CHAT_SEPARATOR,
       ...history.map((message) => message.content),
-      'POST',
+      ...TAIL,
     ]);
   });
 
   it('resolves {{char}} to the member for card text and to the plot everywhere else', () => {
-    const { system, messages } = assemblePrompt({
+    const prompt = assemblePrompt({
       plot: { ...plot, description: '{{char}}의 겨울.' },
       characters: [{ name: '아리아', card: { ...card, description: '{{char}}는 마녀다.', mesExample: '' } }],
       history,
-      preset: { main: '{{char}} 담당 작가.', postHistory: '{{char}} 유지.' },
+      preset: legacyPreset('{{char}} 담당 작가.', '{{char}} 유지.'),
       userName: '민준',
       memoryText: '{{char}}의 지난 이야기.',
     });
-    expect(system).toContain('서리 골짜기의 밤 담당 작가.');
-    expect(system).toContain(`${plotHeader(plot.name)}\n서리 골짜기의 밤의 겨울.`);
-    expect(system).toContain(`${characterHeader('아리아')}\n아리아는 마녀다.`);
-    expect(system).toContain('서리 골짜기의 밤의 지난 이야기.');
-    expect(messages.at(-1)!.content).toBe('서리 골짜기의 밤 유지.');
+    expect(prompt.system).toBe(
+      [
+        '서리 골짜기의 밤 담당 작가.',
+        `아리아는 마녀다.\n\nDescription of 아리아: 무뚝뚝하다.\n\n${scenarioLine('서리 골짜기의 밤의 겨울.')}`,
+        ...CLOSING,
+      ].join('\n\n'),
+    );
+    expect(prompt.messages[0]).toEqual({ role: 'system', content: '서리 골짜기의 밤의 지난 이야기.' });
+    expect(sentAs(prompt, 'global_note')).toEqual(['서리 골짜기의 밤 유지.']);
   });
 
   it('reads a member its scripts renamed, and the greeting they rewrote, as this chat has them', () => {
     // A plot of one member renamed by its scripts: the caller gives the member its new
-    // name and the plot its `{{char}}`; the work's own header keeps the plot's name.
+    // name and the plot its `{{char}}`.
     const renamed: PromptCharacter = { name: '세라', card: { ...card, description: '{{char}}는 마녀다.', mesExample: '' } };
     const opening = { text: '{{char}}가 문을 연다.', index: -1 };
     const { system, messages } = assemblePrompt({
@@ -182,12 +231,12 @@ describe('assemblePrompt', () => {
       characters: [renamed],
       history,
       branch: { length: history.length, greeting: opening },
-      preset: { main: '{{char}} 담당 작가.', postHistory: 'POST' },
+      preset: legacyPreset('{{char}} 담당 작가.', 'POST'),
       userName: '민준',
     });
     expect(system).toContain('세라 담당 작가.');
-    expect(system).toContain(`${plotHeader(plot.name)}\n세라의 겨울.`);
-    expect(system).toContain(`${characterHeader('세라')}\n세라는 마녀다.`);
+    expect(system).toContain(`세라는 마녀다.\n\nDescription of 세라: 무뚝뚝하다.\n\n${scenarioLine('세라의 겨울.')}`);
+    expect(system).toContain(speechProtocol(['세라']));
     expect(system).not.toContain('아리아');
     // The greeting turn is sent as the branch reads it, with its macros.
     expect(messages.map((message) => promptText(message.content))).toContain('세라가 문을 연다.');
@@ -209,35 +258,15 @@ describe('assemblePrompt', () => {
     expect(withBranchGreeting(history.slice(1), { length: 3, greeting: opening })).toEqual(history.slice(1));
   });
 
-  it('includes persona and lorebook sections around the plot and roster blocks', () => {
-    const { system } = assemblePrompt({
+  it("puts the positioned lore around the description, the persona after it, and other always-on lore in RisuAI's lorebook slot", () => {
+    const prompt = assemblePrompt({
       plot: {
         ...plot,
         lorebook: [
-          {
-            keys: [],
-            secondaryKeys: [],
-            selective: false,
-            content: 'BEFORE',
-            enabled: true,
-            constant: true,
-            insertionOrder: 0,
-            caseSensitive: false,
-            useRegex: false,
-            position: 'before_char',
-          },
-          {
-            keys: [],
-            secondaryKeys: [],
-            selective: false,
-            content: 'AFTER',
-            enabled: true,
-            constant: true,
-            insertionOrder: 1,
-            caseSensitive: false,
-            useRegex: false,
-            position: 'after_char',
-          },
+          // The card's own `@@position` placed these.
+          loreEntry({ content: 'BEFORE', positioned: true, insertionOrder: 0 }),
+          loreEntry({ content: 'AFTER', position: 'after_char', positioned: true, insertionOrder: 1 }),
+          loreEntry({ content: 'SLOT', insertionOrder: 2 }),
         ],
       },
       characters: [aria],
@@ -246,14 +275,20 @@ describe('assemblePrompt', () => {
       userName: '민준',
       personaText: '대학생.',
     });
-    const sections = system.split('\n\n');
-    expect(sections[0]).toBe('MAIN');
-    expect(sections[1]).toBe(NARRATION_NOTE);
-    expect(sections[2]).toBe('BEFORE');
-    expect(sections[3]).toBe(PLOT_BLOCK);
-    expect(sections).toContain('AFTER');
-    expect(sections.at(-1)).toBe('User (민준) profile: 대학생.');
-    expect(system.indexOf('AFTER')).toBeGreaterThan(system.indexOf('아리아의 성격'));
+    // RisuAI sends the persona as it is, under no head of its own.
+    expect(prompt.system).toBe(['MAIN', 'BEFORE', DESCRIPTION, 'AFTER', '대학생.', ...CLOSING].join('\n\n'));
+    expect(prompt.systemSections!.map((section) => section.kind)).toEqual([
+      'main',
+      'lore_before',
+      'description',
+      'lore_after',
+      'persona',
+      'speech_protocol',
+      'narration_note',
+    ]);
+    // The lorebook slot follows the newest turn on RisuAI's order without a template.
+    expect(prompt.messages.slice(-4).map((message) => message.content)).toEqual([history[3]!.content, 'SLOT', ...TAIL]);
+    expect(sentAs(prompt, 'lorebook')).toEqual(['SLOT']);
   });
 
   it('keeps every {{img::…}} reference, as RisuAI sends them', () => {
@@ -323,9 +358,10 @@ describe('assemblePrompt', () => {
     );
   });
 
-  it('injects memoryText after the persona, with macros expanded', () => {
+  it("sends memoryText at the head of the chat, where RisuAI's HypaV3 puts its summary, with macros expanded", () => {
     const memoryText = '[Summary of the story so far]\n{{user}}와(과) {{char}}는 이미 만난 적이 있다.';
-    const { system } = assemblePrompt({
+    const memory = '[Summary of the story so far]\n민준와(과) 서리 골짜기의 밤는 이미 만난 적이 있다.';
+    const prompt = assemblePrompt({
       plot,
       characters: [aria],
       history,
@@ -334,12 +370,19 @@ describe('assemblePrompt', () => {
       personaText: '대학생.',
       memoryText,
     });
-    const sections = system.split('\n\n');
-    expect(sections.at(-2)).toBe('User (민준) profile: 대학생.');
-    expect(sections.at(-1)).toBe('[Summary of the story so far]\n민준와(과) 서리 골짜기의 밤는 이미 만난 적이 있다.');
+    // Not in the system string: RisuAI's order without a template has no memory item.
+    expect(prompt.system).toBe(['MAIN', DESCRIPTION, '대학생.', ...CLOSING].join('\n\n'));
+    expect(prompt.messages[0]).toEqual({ role: 'system', content: memory });
+    expect(prompt.sources![0]).toEqual({ kind: 'memory' });
+    expect(prompt.messages.slice(1, 3).map((message) => message.content)).toEqual(EXAMPLES);
+    // A template's memory item holds it among the system turns, a turn of its own for RisuAI.
+    const templated = assemblePrompt({ plot, characters: [aria], history, userName: '민준', memoryText });
+    expect(templated.risu!.system.map((part) => part.memo)).toEqual([undefined, 'supaMemory', undefined]);
+    expect(templated.risu!.system[1]!.text).toBe(`[Roleplay Summary]\n${memory}\n`);
+    expect(templated.messages.map((message) => message.content)).not.toContain(memory);
   });
 
-  it('leaves the system prefix untouched when there is no memory', () => {
+  it('leaves the system prefix and the chat untouched when there is no memory', () => {
     const withBlank = assemblePrompt({
       plot,
       characters: [aria],
@@ -349,6 +392,7 @@ describe('assemblePrompt', () => {
       memoryText: '  ',
     });
     expect(withBlank.system).toBe(assemble(100_000).system);
+    expect(withBlank.messages).toEqual(assemble(100_000).messages);
   });
 
   describe('the recall turn', () => {
@@ -364,27 +408,29 @@ describe('assemblePrompt', () => {
     const conversation = (prompt: ReturnType<typeof assemblePrompt>) =>
       prompt.messages.slice(0, prompt.messages.findLastIndex((message) => message.role !== 'system') + 1);
 
-    it('sends the facts and the messages a search brought back as one system turn right after the newest turn', () => {
-      const { system, messages, sources, report } = recall({ memoryText: '[Summary of the story so far]\n요약.' });
-      // None of it is in the system string: only the summaries are.
-      expect(system).toBe(`${assemble(100_000).system}\n\n[Summary of the story so far]\n요약.`);
-      // Everything up to the newest turn is what a turn recalling nothing sends.
-      const plain = assemblePrompt({ plot, characters: [aria], history: turns, preset, userName: '민준' });
-      expect(messages.slice(0, -2)).toEqual(plain.messages.slice(0, -1));
-      expect(messages.slice(-3)).toEqual([
+    it('sends the facts and the messages a search brought back as one system turn in what follows the chat', () => {
+      const memoryText = '[Summary of the story so far]\n요약.';
+      const { system, messages, sources, report } = recall({ memoryText });
+      // None of it is in the system string, and neither is the memory, which heads the chat.
+      expect(system).toBe(assemble(100_000).system);
+      // Everything before it is what a turn recalling nothing sends.
+      const plain = assemblePrompt({ plot, characters: [aria], history: turns, preset, userName: '민준', memoryText });
+      expect(messages.slice(0, -1)).toEqual(plain.messages);
+      expect(messages.slice(-4)).toEqual([
         { role: 'user', content: history[3]!.content },
-        { role: 'system', content: RECALL },
         { role: 'system', content: 'POST' },
+        { role: 'system', content: REMINDER },
+        { role: 'system', content: RECALL },
       ]);
-      expect(sources!.at(-2)).toEqual({ kind: 'recall' });
+      expect(sources!.at(-1)).toEqual({ kind: 'recall' });
       // The inspector shows it where it is sent.
-      expect(report!.blocks.slice(-3).map((block) => block.kind)).toEqual(['history', 'recall', 'post_history']);
-      expect(report!.blocks.at(-2)!.text).toBe(RECALL);
+      expect(report!.blocks.slice(-4).map((block) => block.kind)).toEqual(['history', 'global_note', 'speech_protocol', 'recall']);
+      expect(report!.blocks.at(-1)!.text).toBe(RECALL);
     });
 
     it('keeps the order facts, retrieval, and leaves out what is blank', () => {
       const only = (input: Partial<typeof recalled>) =>
-        recall({ factsText: '', retrievalText: '', ...input }).messages.at(-2)!.content;
+        recall({ factsText: '', retrievalText: '', ...input }).messages.at(-1)!.content;
       expect(only({ retrievalText: recalled.retrievalText })).toBe('Past events:\n민준: 등대에 가자');
       expect(only({ factsText: recalled.factsText })).toBe('[Memory]\n- (약 20턴 전) 민준는 등대 열쇠를 갖고 있다.');
       const none = recall({ factsText: ' ', retrievalText: '  ' });
@@ -394,9 +440,10 @@ describe('assemblePrompt', () => {
     it('opens with the summaries the query and the draw picked, which are memory and not fixed tokens', () => {
       const picked = '[Summary of the story so far: recalled this turn]\n(약 40턴 전) {{user}}는 등대에 올랐다.';
       const { system, messages } = recall({ memoryText: '[Summary of the story so far]\n요약.', recalledMemoryText: picked });
-      // The system string carries only the summaries that change when one lands.
-      expect(system).toBe(`${assemble(100_000).system}\n\n[Summary of the story so far]\n요약.`);
-      expect(messages.at(-2)).toEqual({
+      // The summaries that change only when one lands head the chat; what this turn picked goes with the recall turn.
+      expect(system).toBe(assemble(100_000).system);
+      expect(messages[0]).toEqual({ role: 'system', content: '[Summary of the story so far]\n요약.' });
+      expect(messages.at(-1)).toEqual({
         role: 'system',
         content: `[Summary of the story so far: recalled this turn]\n(약 40턴 전) 민준는 등대에 올랐다.\n\n${RECALL}`,
       });
@@ -405,7 +452,7 @@ describe('assemblePrompt', () => {
       // Only the blank line it is joined to the rest by is left in.
       const sent = '[Summary of the story so far: recalled this turn]\n(약 40턴 전) 민준는 등대에 올랐다.';
       expect(withIt.fixedTokens! - without.fixedTokens!).toBe(countTokens(`${sent}\n\n${RECALL}`) - countTokens(RECALL) - countTokens(sent));
-      expect(recall({ factsText: '', retrievalText: '', recalledMemoryText: picked }).messages.at(-2)!.content).toBe(
+      expect(recall({ factsText: '', retrievalText: '', recalledMemoryText: picked }).messages.at(-1)!.content).toBe(
         '[Summary of the story so far: recalled this turn]\n(약 40턴 전) 민준는 등대에 올랐다.',
       );
     });
@@ -422,22 +469,26 @@ describe('assemblePrompt', () => {
       expect(second.messages.slice(conversation(first).length).map((message) => message.content)).toEqual([
         '다섯 번째 답장.',
         '여섯 번째.',
+        ...TAIL,
         '[Game ruling]\n판정 둘.',
         '[Memory]\n- 다른 사실.\n\nPast events:\n민준: 등대에 가자',
-        'POST',
       ]);
     });
 
     it('follows the newest turn sent: a reply a group round already has, or the turn before a hidden one', () => {
       const round = [...turns, { role: 'assistant' as const, content: '다섯 번째, 첫 화자의 답장.', id: 'm4' }];
-      expect(recall({ history: round }).messages.slice(-3).map((message) => message.content)).toEqual([
+      expect(recall({ history: round }).messages.slice(-4).map((message) => message.content)).toEqual([
         '다섯 번째, 첫 화자의 답장.',
+        ...TAIL,
         RECALL,
-        'POST',
       ]);
       // A turn hidden from the AI is not sent, so neither does the recall turn follow it.
       const hidden = round.map((turn) => (turn.id === 'm4' ? { ...turn, hidden: true } : turn));
-      expect(recall({ history: hidden }).messages.slice(-3).map((message) => message.content)).toEqual([history[3]!.content, RECALL, 'POST']);
+      expect(recall({ history: hidden }).messages.slice(-4).map((message) => message.content)).toEqual([
+        history[3]!.content,
+        ...TAIL,
+        RECALL,
+      ]);
     });
 
     it('leaves the depth lore, the note and the start injection before the newest turn, and goes ahead of the depth-0 lore after it', () => {
@@ -461,15 +512,15 @@ describe('assemblePrompt', () => {
         injections: { start: '시작 주입.' },
         directions: '판정.',
       });
-      expect(messages.slice(-8).map((message) => message.content)).toEqual([
+      expect(messages.slice(-9).map((message) => message.content)).toEqual([
         '깊이 하나의 로어.',
         '유저노트.',
         '시작 주입.',
         history[3]!.content,
+        ...TAIL,
         '[Game ruling]\n판정.',
         RECALL,
         '깊이 영의 로어.',
-        'POST',
       ]);
     });
 
@@ -479,29 +530,25 @@ describe('assemblePrompt', () => {
       // The facts come on top of the summaries' share, so the summarizer has to see them.
       expect(full.fixedTokens! - bare.fixedTokens!).toBe(countTokens(RECALL));
       // A budget that holds nothing but the newest turn still holds the recall turn.
-      const tight = recall({ contextBudget: countTokens(bare.system) + countTokens('POST') + countTokens(RECALL) + countTokens(history[3]!.content), maxResponseTokens: 0 });
-      expect(tight.messages.map((message) => message.content)).toEqual([history[3]!.content, RECALL, 'POST']);
+      const tight = recall({ contextBudget: bare.fixedTokens! + countTokens(RECALL) + countTokens(history[3]!.content), maxResponseTokens: 0 });
+      expect(tight.messages.map((message) => message.content)).toEqual([history[3]!.content, ...TAIL, RECALL]);
     });
 
-    it('stands where the turns would end when none of the history is sent', () => {
+    it('still closes what follows the chat when none of the history is sent', () => {
       const { messages } = recall({ history: [] });
-      expect(messages.slice(-2).map((message) => message.content)).toEqual([RECALL, 'POST']);
+      expect(messages.slice(-3).map((message) => message.content)).toEqual([...TAIL, RECALL]);
     });
   });
 
-  it('charges memoryText to the same budget as the rest of the system prefix', () => {
+  it('charges memoryText to the same budget as the rest of what is never evicted', () => {
     const memoryText = '[Summary of the story so far]\n'.padEnd(400, '요약 ');
     const base = assemble(100_000);
-    const budget =
-      countTokens(base.system) +
-      countTokens('POST') +
-      countTokens(history[2]!.content) +
-      countTokens(history[3]!.content);
+    const budget = base.fixedTokens! + countTokens(history[2]!.content) + countTokens(history[3]!.content);
     // Without memory that budget holds the last two turns (see the eviction test).
     expect(assemble(budget).messages.map((m) => m.content)).toEqual([
       history[2]!.content,
       history[3]!.content,
-      'POST',
+      ...TAIL,
     ]);
 
     const tight = assemblePrompt({
@@ -515,12 +562,11 @@ describe('assemblePrompt', () => {
       memoryText,
     });
     // The memory block eats into the same budget, so one more turn is evicted.
-    expect(tight.messages.map((m) => m.content)).toEqual([history[3]!.content, 'POST']);
-    expect(tight.system).toContain('[Summary of the story so far]');
+    expect(tight.messages.map((m) => m.content)).toEqual([memoryText.trim(), history[3]!.content, ...TAIL]);
   });
 
-  it('injects the preset into the first member card system prompt via {{original}}', () => {
-    const { system, messages } = assemblePrompt({
+  it("reads the first member card's system prompt and post-history instructions in place of the preset's, via {{original}}", () => {
+    const prompt = assemblePrompt({
       plot,
       characters: [
         {
@@ -537,71 +583,79 @@ describe('assemblePrompt', () => {
       history,
       preset,
     });
-    expect(system.startsWith('MAIN\n\n추가 규칙.')).toBe(true);
-    expect(system).not.toContain('무시된다.');
-    expect(messages.at(-1)).toEqual({ role: 'system', content: 'POST 리마인더.' });
+    expect(prompt.system.startsWith('MAIN\n\n추가 규칙.')).toBe(true);
+    expect(prompt.system).not.toContain('무시된다.');
+    expect(sentAs(prompt, 'global_note')).toEqual(['POST 리마인더.']);
   });
 
-  it("keeps the preset's speech protocol under a card's own instructions", () => {
+  it("keeps the speech protocol under a card's own instructions, once", () => {
     const assembled = (systemPrompt: string, postHistoryInstructions: string) =>
       assemblePrompt({
         plot,
         characters: [{ name: '아리아', card: { ...card, systemPrompt, postHistoryInstructions } }],
         history,
-        preset: DEFAULT_PRESET,
+        preset,
       });
     // A RisuAI card's instructions know nothing of the `이름: ` lines a reply is read by.
     const own = assembled('카드의 규칙.', '카드의 리마인더.');
-    expect(own.system.startsWith(`카드의 규칙.\n\n${SPEECH_PROTOCOL}`)).toBe(true);
-    expect(own.system).not.toContain('작성 규칙:');
-    expect(own.messages.at(-1)).toEqual({
-      role: 'system',
-      content: `카드의 리마인더.\n\n${SPEECH_PROTOCOL_REMINDER}`,
-    });
-    // One that brings the preset back through {{original}} already has it — once.
+    expect(own.system).toBe(['카드의 규칙.', DESCRIPTION, ...CLOSING].join('\n\n'));
+    expect(own.messages.slice(-2)).toEqual([
+      { role: 'system', content: '카드의 리마인더.' },
+      { role: 'system', content: REMINDER },
+    ]);
+    // One that brings the preset back through {{original}} has it once all the same.
     const kept = assembled('{{original}}\n\n추가.', '');
-    expect(kept.system.split(SPEECH_PROTOCOL)).toHaveLength(2);
+    expect(kept.system.startsWith('MAIN\n\n추가.')).toBe(true);
+    expect(kept.system.split(PROTOCOL)).toHaveLength(2);
   });
 
   it('drops example dialogue first, then the oldest history', () => {
     const full = assemble(100_000);
-    const systemTokens = countTokens(full.system);
-    const postTokens = countTokens('POST');
+    const fixed = full.fixedTokens!;
     const historyTokens = history.map((message) => countTokens(message.content));
     const sum = (values: number[]): number => values.reduce((a, b) => a + b, 0);
 
-    // Everything fits: two example blocks, then the whole history, then post-history.
+    // Everything fits: two example blocks, RisuAI's separator, the whole history,
+    // then the global note and the reminder.
     expect(full.messages.map((m) => m.role)).toEqual([
       'system',
       'system',
+      'system',
       'assistant',
       'user',
       'assistant',
       'user',
       'system',
+      'system',
     ]);
-    expect(full.messages[0]!.content).toBe(
-      `${exampleHeader('아리아')}\n민준: 예시 질문 하나\n아리아: 예시 답변 하나`,
-    );
+    expect(full.messages.slice(0, 3).map((m) => m.content)).toEqual([...EXAMPLES, NEW_CHAT_SEPARATOR]);
 
-    // Exactly enough for the full history: examples are evicted.
-    const historyOnly = assemble(systemTokens + postTokens + sum(historyTokens));
+    // Room for the full history and the separator: the examples are evicted.
+    const withSeparator = assemble(fixed + sum(historyTokens) + countTokens(NEW_CHAT_SEPARATOR));
+    expect(withSeparator.messages.map((m) => m.content)).toEqual([
+      NEW_CHAT_SEPARATOR,
+      ...history.map((m) => m.content),
+      ...TAIL,
+    ]);
+
+    // Exactly enough for the full history: the separator goes with them.
+    const historyOnly = assemble(fixed + sum(historyTokens));
     expect(historyOnly.messages.map((m) => m.content)).toEqual([
       ...history.map((m) => m.content),
-      'POST',
+      ...TAIL,
     ]);
 
     // Only the last two history messages fit: the oldest are evicted next.
-    const tail = assemble(systemTokens + postTokens + sum(historyTokens.slice(-2)));
+    const tail = assemble(fixed + sum(historyTokens.slice(-2)));
     expect(tail.messages.map((m) => m.content)).toEqual([
       history[2]!.content,
       history[3]!.content,
-      'POST',
+      ...TAIL,
     ]);
   });
 
   it('names the member each example block belongs to, roster order first', () => {
-    const { messages } = assemblePrompt({
+    const { messages, sources, report } = assemblePrompt({
       plot,
       characters: [
         { name: '아리아', card: { ...card, mesExample: '<START>\n{{char}}: 아리아의 예시' } },
@@ -610,16 +664,23 @@ describe('assemblePrompt', () => {
       history,
       preset,
       userName: '민준',
+      report: true,
     });
     expect(messages.slice(0, 2).map((m) => m.content)).toEqual([
-      `${exampleHeader('아리아')}\n아리아: 아리아의 예시`,
-      `${exampleHeader('민수')}\n민수: 민수의 예시`,
+      exampleBlock('아리아: 아리아의 예시'),
+      exampleBlock('민수: 민수의 예시'),
+    ]);
+    // The inspector says whose each is, and the request editors whose lines it holds.
+    expect(report!.blocks.filter((block) => block.kind === 'examples').map((block) => block.label)).toEqual(['아리아', '민수']);
+    expect(sources!.slice(0, 2).map((source) => source.speakers)).toEqual([
+      { user: '민준', char: ['아리아', '아리아'] },
+      { user: '민준', char: ['민수', '민수'] },
     ]);
   });
 
   it('always keeps the newest message even when the budget is exhausted', () => {
     const tiny = assemble(1);
-    expect(tiny.messages.map((m) => m.content)).toEqual([history[3]!.content, 'POST']);
+    expect(tiny.messages.map((m) => m.content)).toEqual([history[3]!.content, ...TAIL]);
   });
 });
 
@@ -659,7 +720,7 @@ const withLore = (lorebook: LoreEntry[], contextBudget = 100_000) =>
 
 describe('assemblePrompt - merged lorebook', () => {
   it('activates the plot book and every member book as one, plot first on a tie', () => {
-    const { system } = assemblePrompt({
+    const prompt = assemblePrompt({
       plot: {
         ...plot,
         lorebook: [loreEntry({ content: 'PLOT', insertionOrder: 1 })],
@@ -682,11 +743,11 @@ describe('assemblePrompt - merged lorebook', () => {
     });
     // insertionOrder decides across books; the stable sort keeps the plot ahead
     // of a member entry it ties with, and members in roster order behind it.
-    expect(system.split('\n\n').slice(2, 5)).toEqual(['MINSU', 'PLOT', 'ARIA']);
+    expect(sentAs(prompt, 'lorebook')).toEqual(['MINSU', 'PLOT', 'ARIA']);
   });
 
   it('resolves {{char}} in each book against whoever the book belongs to', () => {
-    const { system } = assemblePrompt({
+    const prompt = assemblePrompt({
       plot: { ...plot, lorebook: [loreEntry({ content: '{{char}} 세계.', insertionOrder: 0 })] },
       characters: [
         {
@@ -698,57 +759,60 @@ describe('assemblePrompt - merged lorebook', () => {
       preset,
       userName: '민준',
     });
-    expect(system).toContain('서리 골짜기의 밤 세계.\n\n아리아 기억.');
+    expect(sentAs(prompt, 'lorebook')).toEqual(['서리 골짜기의 밤 세계.', '아리아 기억.']);
   });
 
   it('takes the scan depth and the lore budget from the first member', () => {
     const budgeted = (loreSettings: NormalizedCard['loreSettings']) =>
-      assemblePrompt({
-        plot: {
-          ...plot,
-          lorebook: [
-            loreEntry({ content: '첫 번째 항목.', insertionOrder: 0 }),
-            loreEntry({ content: '두 번째 항목.', insertionOrder: 1 }),
-          ],
-        },
-        characters: [{ name: '아리아', card: { ...bareCard, loreSettings } }],
-        history,
-        preset,
-        userName: '민준',
-      }).system;
-    expect(budgeted({ ...DEFAULT_LORE_SETTINGS })).toContain('첫 번째 항목.');
+      sentAs(
+        assemblePrompt({
+          plot: {
+            ...plot,
+            lorebook: [
+              loreEntry({ content: '첫 번째 항목.', insertionOrder: 0 }),
+              loreEntry({ content: '두 번째 항목.', insertionOrder: 1 }),
+            ],
+          },
+          characters: [{ name: '아리아', card: { ...bareCard, loreSettings } }],
+          history,
+          preset,
+          userName: '민준',
+        }),
+        'lorebook',
+      );
+    expect(budgeted({ ...DEFAULT_LORE_SETTINGS })).toEqual(['첫 번째 항목.', '두 번째 항목.']);
     // Room for one: the entry ranked higher (insertionOrder 1) takes it.
-    const tight = budgeted({ ...DEFAULT_LORE_SETTINGS, tokenBudget: countTokens('두 번째 항목.') });
-    expect(tight).toContain('두 번째 항목.');
-    expect(tight).not.toContain('첫 번째 항목.');
+    expect(budgeted({ ...DEFAULT_LORE_SETTINGS, tokenBudget: countTokens('두 번째 항목.') })).toEqual(['두 번째 항목.']);
   });
 
   it('gives a card that names no budget its share of the context budget', () => {
     const first = '첫 번째 항목.';
     const second = '두 번째 항목.';
     const automatic = (contextBudget: number) =>
-      assemblePrompt({
-        plot: {
-          ...plot,
-          lorebook: [
-            loreEntry({ content: first, insertionOrder: 0 }),
-            loreEntry({ content: second, insertionOrder: 1 }),
-          ],
-        },
-        characters: [{ name: '아리아', card: { ...bareCard, loreSettings: { ...DEFAULT_LORE_SETTINGS } } }],
-        history,
-        preset,
-        userName: '민준',
-        contextBudget,
-        maxResponseTokens: 0,
-      }).system;
+      sentAs(
+        assemblePrompt({
+          plot: {
+            ...plot,
+            lorebook: [
+              loreEntry({ content: first, insertionOrder: 0 }),
+              loreEntry({ content: second, insertionOrder: 1 }),
+            ],
+          },
+          characters: [{ name: '아리아', card: { ...bareCard, loreSettings: { ...DEFAULT_LORE_SETTINGS } } }],
+          history,
+          preset,
+          userName: '민준',
+          contextBudget,
+          maxResponseTokens: 0,
+        }),
+        'lorebook',
+      );
     // Room for exactly the higher-ranked entry: the budget is the share, rounded down.
     const tight = Math.ceil(countTokens(second) / LORE_BUDGET_SHARE);
     expect(Math.floor(tight * LORE_BUDGET_SHARE)).toBe(countTokens(second));
-    expect(automatic(tight)).toContain(second);
-    expect(automatic(tight)).not.toContain(first);
+    expect(automatic(tight)).toEqual([second]);
     const roomy = Math.ceil((countTokens(first) + countTokens(second)) / LORE_BUDGET_SHARE);
-    expect(automatic(roomy)).toContain(first);
+    expect(automatic(roomy)).toEqual([first, second]);
   });
 
   it("gives a RisuAI book that names no budget half the context, and a SillyTavern one ST's quarter", () => {
@@ -804,13 +868,14 @@ describe('assemblePrompt - merged lorebook', () => {
       userName: '민준',
       variables: { flag: '0' },
     });
-    expect(system).toContain(later);
     expect(system).not.toContain('숨은 설정');
-    // Neither an empty system section nor an empty depth message is left behind.
     expect(system).not.toContain('\n\n\n\n');
+    // Neither an empty lorebook message nor an empty depth message is left behind.
     expect(messages.map((message) => message.content)).toEqual([
+      NEW_CHAT_SEPARATOR,
       ...history.map((turn) => turn.content),
-      'POST',
+      later,
+      ...TAIL,
     ]);
   });
 });
@@ -856,8 +921,9 @@ describe('assemblePrompt - the moved lore', () => {
       ],
       { plot: { ...plot, description: `${plot.description} {{outlet::o}}` }, authorNote: '유저노트.' },
     );
-    expect(section(prompt, 'lore_before')).toBe('ALWAYS BEFORE\n\nKEY PLACED');
-    expect(section(prompt, 'lore_after')).toBe('ALWAYS AFTER');
+    // The positioned entry stays before the description, the always-on ones in the lorebook slot.
+    expect(section(prompt, 'lore_before')).toBe('KEY PLACED');
+    expect(sentAs(prompt, 'lorebook')).toEqual(['ALWAYS BEFORE', 'ALWAYS AFTER']);
     expect(prompt.system).toContain(`${plot.description} KEY OUTLET`);
     for (const moved of ['KEY BEFORE', 'KEY AFTER', 'ST BEFORE', 'ST AFTER']) expect(prompt.system).not.toContain(moved);
     expect(movedLoreOf(prompt)).toBe('KEY BEFORE\n\nST BEFORE\n\nKEY AFTER\n\nST AFTER');
@@ -886,19 +952,19 @@ describe('assemblePrompt - the moved lore', () => {
       loreState: { chatLength: 4, lastTriggered: { [loreEntryKey(held)]: 2, [loreEntryKey(alwaysHeld)]: 2 } },
     });
     expect(prompt.report!.lore.map((entry) => entry.via)).toEqual(['constant', 'recursion', 'sticky', expect.any(String)]);
-    expect(section(prompt, 'lore_before')).toBe('ALWAYS: 등대\n\nALWAYS HELD');
+    expect(sentAs(prompt, 'lorebook')).toEqual(['ALWAYS: 등대', 'ALWAYS HELD']);
     expect(movedLoreOf(prompt)).toBe('RECURSED\n\nHELD');
-    // With no turn to follow, it stands where the turns would end, as the recall turn does.
+    // With no turn to follow, it still goes in the lorebook slot, after the always-on entries.
     const bare = assembleLore([], {
       characters: [
         { name: '아리아', card: { ...bareCard, lorebook, loreSettings: { ...DEFAULT_LORE_SETTINGS, recursiveScanning: true } } },
       ],
       history: [],
     });
-    expect(texts(bare)).toEqual(['RECURSED', 'POST']);
+    expect(texts(bare)).toEqual([NEW_CHAT_SEPARATOR, 'ALWAYS: 등대', 'ALWAYS HELD', 'RECURSED', ...TAIL]);
   });
 
-  it('sends the moved entries as the system string would have, macros and order and all', () => {
+  it('sends the moved entries as the lorebook slot sends them always on, macros and order and all', () => {
     const book = [
       keyed('B2 {{char}}', { insertionOrder: 5 }),
       keyed('A1', { position: 'after_char', insertionOrder: 1 }),
@@ -907,12 +973,12 @@ describe('assemblePrompt - the moved lore', () => {
       keyed('{{#if {{getvar::flag}}}}EMPTY{{/if}}', { insertionOrder: 3 }),
     ];
     const moved = assembleLore(book, { variables: { flag: '0' } });
-    // The same entries always on: where today's system string held them.
+    // The same entries always on: a turn each in the lorebook slot.
     const kept = assembleLore(
       book.map((entry) => ({ ...entry, constant: true })),
       { variables: { flag: '0' } },
     );
-    expect(movedLoreOf(moved)).toBe(`${section(kept, 'lore_before')}\n\n${section(kept, 'lore_after')}`);
+    expect(movedLoreOf(moved)).toBe(sentAs(kept, 'lorebook').join('\n\n'));
     expect(movedLoreOf(moved)).toBe('B1 민준\n\nB2 아리아\n\nA1\n\nA2');
     // What stays is the system string of a work with no such lore.
     expect(moved.system).toBe(assembleLore([]).system);
@@ -923,36 +989,58 @@ describe('assemblePrompt - the moved lore', () => {
     expect(assembleLore([loreEntry({ content: 'ALWAYS' })]).sources!.some((source) => source.kind === 'moved_lore')).toBe(false);
   });
 
-  it('goes first after the newest turn: ahead of the directions, the recall turn, the depth-0 lore and the rest', () => {
+  it('goes in the lorebook slot after the newest turn: ahead of the global note, the directions, the recall turn and the depth-0 lore', () => {
     const prompt = assembleLore([keyed('KEY'), loreEntry({ content: 'DEPTH ZERO', depth: 0 }), keyed('KEY DEEP', { depth: 1 })], {
       directions: '판정.',
       factsText: '[Memory]\n- 사실.',
       injections: { start: '시작 주입.', historyend: '끝 주입.', promptend: '맨끝 주입.' },
     });
-    expect(texts(prompt).slice(-10)).toEqual([
+    expect(texts(prompt).slice(-11)).toEqual([
       'KEY DEEP',
       '시작 주입.',
       history[3]!.content,
+      '끝 주입.',
       'KEY',
+      ...TAIL,
       '[Game ruling]\n판정.',
       '[Memory]\n- 사실.',
       'DEPTH ZERO',
-      '끝 주입.',
-      'POST',
       '맨끝 주입.',
     ]);
     const kinds = prompt.sources!.map((source) => source.kind);
-    expect(kinds.slice(-8)).toEqual(['history', 'moved_lore', 'directions', 'recall', 'depth_lore', 'injection', 'post_history', 'injection']);
+    expect(kinds.slice(-9)).toEqual([
+      'history',
+      'injection',
+      'moved_lore',
+      'global_note',
+      'speech_protocol',
+      'directions',
+      'recall',
+      'depth_lore',
+      'injection',
+    ]);
     // The inspector shows it where it is sent, as its own block.
     const blocks = prompt.report!.blocks;
     const at = blocks.findIndex((block) => block.kind === 'moved_lore');
-    expect(blocks.slice(at - 1, at + 2).map((block) => block.kind)).toEqual(['history', 'moved_lore', 'directions']);
+    expect(blocks.slice(at - 1, at + 2).map((block) => block.kind)).toEqual(['injection', 'moved_lore', 'global_note']);
     expect(blocks[at]).toEqual({ kind: 'moved_lore', tokens: countTokens('KEY'), text: 'KEY' });
     // A reply already in the round, or a turn hidden from the AI: it follows the newest turn sent.
     const round = [...turns, { role: 'assistant' as const, content: '다섯 번째 캐릭터 발화.', id: 'm4' }];
-    expect(texts(assembleLore([keyed('KEY')], { history: round })).slice(-3)).toEqual(['다섯 번째 캐릭터 발화.', 'KEY', 'POST']);
+    expect(texts(assembleLore([keyed('KEY')], { history: round })).slice(-4)).toEqual(['다섯 번째 캐릭터 발화.', 'KEY', ...TAIL]);
     const hidden = round.map((turn) => (turn.id === 'm4' ? { ...turn, hidden: true } : turn));
-    expect(texts(assembleLore([keyed('KEY')], { history: hidden })).slice(-3)).toEqual([history[3]!.content, 'KEY', 'POST']);
+    expect(texts(assembleLore([keyed('KEY')], { history: hidden })).slice(-4)).toEqual([history[3]!.content, 'KEY', ...TAIL]);
+    // Under a template whose lorebook item comes before the chat — the built-in one —
+    // it goes with what follows the chat instead, never into the system string.
+    const templated = assembleLore([keyed('KEY')], { preset: DEFAULT_PRESET, directions: '판정.' });
+    const sent = texts(templated);
+    expect(movedLoreOf(templated)).toBe('KEY');
+    expect(sent.slice(sent.indexOf(history[3]!.content))).toEqual([
+      history[3]!.content,
+      REMINDER,
+      'KEY',
+      '[Game ruling]\n판정.',
+      OAI_JAILBREAK,
+    ]);
   });
 
   it('lets the next turn repeat this request up to the system turns that close it, though the keyword lore changed', () => {
@@ -989,9 +1077,9 @@ describe('assemblePrompt - the moved lore', () => {
     const card = { ...bareCard, lorebook: [long], loreSettings: { ...DEFAULT_LORE_SETTINGS, tokenBudget: 10_000 } };
     const tight = assembleLore([], {
       characters: [{ name: '아리아', card }],
-      contextBudget: countTokens(bare.system) + countTokens('POST') + countTokens(moved) + countTokens(history[3]!.content),
+      contextBudget: bare.fixedTokens! + countTokens(moved) + countTokens(history[3]!.content),
     });
-    expect(texts(tight)).toEqual([history[3]!.content, moved, 'POST']);
+    expect(texts(tight)).toEqual([history[3]!.content, moved, ...TAIL]);
     // The lore budget still decides which entries get in, as it did: the higher insertionOrder first.
     const first = keyed('FIRST', { insertionOrder: 2 });
     const second = keyed('SECOND', { insertionOrder: 1 });
@@ -1025,22 +1113,26 @@ describe('constantLoreTokens', () => {
 });
 
 describe('assemblePrompt - depth lore', () => {
-  it('splices depth entries into the history instead of the system block', () => {
+  it('splices depth entries into the history instead of the system block, depth 0 with what follows the chat', () => {
     const { system, messages } = withLore([
       loreEntry({ content: 'DEPTH0', depth: 0, insertionOrder: 1 }),
       loreEntry({ content: 'DEPTH2', depth: 2, role: 'assistant', insertionOrder: 2 }),
       loreEntry({ content: 'SYSTEM', insertionOrder: 3 }),
     ]);
-    expect(system).toContain('SYSTEM');
     expect(system).not.toContain('DEPTH');
+    expect(system).not.toContain('SYSTEM');
     expect(messages).toEqual([
+      { role: 'system', content: NEW_CHAT_SEPARATOR },
       { role: 'assistant', content: history[0]!.content },
       { role: 'user', content: history[1]!.content },
       { role: 'assistant', content: 'DEPTH2' },
       { role: 'assistant', content: history[2]!.content },
       { role: 'user', content: history[3]!.content },
-      { role: 'system', content: 'DEPTH0' },
+      // The always-on entry no position places: RisuAI's lorebook slot.
+      { role: 'system', content: 'SYSTEM' },
       { role: 'system', content: 'POST' },
+      { role: 'system', content: REMINDER },
+      { role: 'system', content: 'DEPTH0' },
     ]);
   });
 
@@ -1048,10 +1140,13 @@ describe('assemblePrompt - depth lore', () => {
     const { messages } = withLore([
       loreEntry({ content: '{{char}} 기억', depth: 99, role: 'user', insertionOrder: 1 }),
     ]);
-    expect(messages[0]).toEqual({ role: 'user', content: '아리아 기억' });
-    expect(messages.slice(1).map((m) => m.content)).toEqual([
+    expect(messages.slice(0, 2)).toEqual([
+      { role: 'system', content: NEW_CHAT_SEPARATOR },
+      { role: 'user', content: '아리아 기억' },
+    ]);
+    expect(messages.slice(2).map((m) => m.content)).toEqual([
       ...history.map((m) => m.content),
-      'POST',
+      ...TAIL,
     ]);
   });
 
@@ -1063,19 +1158,20 @@ describe('assemblePrompt - depth lore', () => {
       loreEntry({ content: 'CLAMP-A', depth: 9, insertionOrder: 4 }),
     ]);
     expect(messages.map((m) => m.content)).toEqual([
+      NEW_CHAT_SEPARATOR,
       'CLAMP-A',
       'CLAMP-B',
       ...history.slice(0, 3).map((m) => m.content),
       'FIRST',
       'SECOND',
       history[3]!.content,
-      'POST',
+      ...TAIL,
     ]);
   });
 
   it('counts trailingTurns so a continue prefill does not shift the depths', () => {
     // The continue path assembles the history without its trailing partial and
-    // re-attaches it after post-history, so depth must be measured as if it were
+    // re-attaches it after everything, so depth must be measured as if it were
     // still the last message.
     const lorebook = [
       loreEntry({ content: 'DEPTH1', depth: 1, insertionOrder: 1 }),
@@ -1092,31 +1188,35 @@ describe('assemblePrompt - depth lore', () => {
       maxResponseTokens: 0,
       trailingTurns: 1,
     });
-    // With the partial re-attached the result reads h1, h2, DEPTH2, h3, DEPTH1,
-    // POST, partial — the same slots the entries take without a continue.
+    // With the partial re-attached the result reads h1, h2, DEPTH2, h3, POST, the
+    // reminder, DEPTH1, partial — DEPTH1 right before the last turn and DEPTH2
+    // before the one ahead of it, as the entries are without a continue. DEPTH1
+    // stands at the history's end, so it goes with what follows the chat, as depth 0 does.
     expect([...messages.map((m) => m.content), partial]).toEqual([
+      NEW_CHAT_SEPARATOR,
       history[0]!.content,
       history[1]!.content,
       'DEPTH2',
       history[2]!.content,
+      ...TAIL,
       'DEPTH1',
-      'POST',
       partial,
     ]);
     expect(withLore(lorebook).messages.map((m) => m.content)).toEqual([
+      NEW_CHAT_SEPARATOR,
       history[0]!.content,
       history[1]!.content,
       'DEPTH2',
       history[2]!.content,
       'DEPTH1',
       history[3]!.content,
-      'POST',
+      ...TAIL,
     ]);
   });
 
   it('clamps a depth that would fall behind the trailing turns', () => {
     // Depth 0 wants to sit after the prefill, which the model must have last, so
-    // it clamps to the end of the history block like depth 1.
+    // it clamps to the end of the history like depth 1: with what follows the chat.
     const { messages } = assemblePrompt({
       plot,
       characters: [
@@ -1139,10 +1239,11 @@ describe('assemblePrompt - depth lore', () => {
       trailingTurns: 1,
     });
     expect(messages.map((m) => m.content)).toEqual([
+      NEW_CHAT_SEPARATOR,
       'DEEP',
       ...history.slice(0, 3).map((m) => m.content),
+      ...TAIL,
       'DEPTH0',
-      'POST',
     ]);
   });
 
@@ -1157,14 +1258,10 @@ describe('assemblePrompt - depth lore', () => {
       contextBudget: 100_000,
       maxResponseTokens: 0,
     });
-    const budget =
-      countTokens(base.system) +
-      countTokens('POST') +
-      countTokens(history[2]!.content) +
-      countTokens(history[3]!.content);
+    const budget = base.fixedTokens! + countTokens(history[2]!.content) + countTokens(history[3]!.content);
     // The depth entry takes its tokens from the same budget as the history.
     const { messages } = withLore([loreEntry({ content: depthText, depth: 0 })], budget);
-    expect(messages.map((m) => m.content)).toEqual([history[3]!.content, depthText, 'POST']);
+    expect(messages.map((m) => m.content)).toEqual([history[3]!.content, ...TAIL, depthText]);
   });
 });
 
@@ -1176,7 +1273,10 @@ describe('assemblePrompt - author note', () => {
     { role: 'user', content: '여섯 번째 유저 발화입니다.' },
   ];
 
-  it(`sits ${AUTHOR_NOTE_DEPTH} messages from the end of the history`, () => {
+  // The chat's own settings (any at all) put the note at SillyTavern's depth.
+  const atDepth = { authorNoteSettings: {} };
+
+  it(`sits ${AUTHOR_NOTE_DEPTH} messages from the end of the history once the chat sets SillyTavern's placement`, () => {
     const { messages } = assemblePrompt({
       plot,
       characters: [aria],
@@ -1184,14 +1284,15 @@ describe('assemblePrompt - author note', () => {
       preset,
       userName: '민준',
       authorNote,
+      ...atDepth,
     });
     expect(messages.map((m) => m.content)).toEqual([
-      `${exampleHeader('아리아')}\n민준: 예시 질문 하나\n아리아: 예시 답변 하나`,
-      `${exampleHeader('아리아')}\n민준: 예시 질문 둘\n아리아: 예시 답변 둘`,
+      ...EXAMPLES,
+      NEW_CHAT_SEPARATOR,
       ...longer.slice(0, 2).map((m) => m.content),
       '민준는 지금 초조하다.',
       ...longer.slice(2).map((m) => m.content),
-      'POST',
+      ...TAIL,
     ]);
     expect(messages.find((m) => m.content === '민준는 지금 초조하다.')?.role).toBe('system');
   });
@@ -1209,8 +1310,9 @@ describe('assemblePrompt - author note', () => {
       preset,
       userName: '민준',
       authorNote,
+      ...atDepth,
     });
-    expect(messages.map((m) => m.content).slice(1, 5)).toEqual([
+    expect(messages.map((m) => m.content).slice(2, 6)).toEqual([
       longer[1]!.content,
       'DEPTH4',
       '민준는 지금 초조하다.',
@@ -1224,11 +1326,13 @@ describe('assemblePrompt - author note', () => {
       preset,
       userName: '민준',
       authorNote,
+      ...atDepth,
     });
     expect(short.messages.map((m) => m.content)).toEqual([
+      NEW_CHAT_SEPARATOR,
       '민준는 지금 초조하다.',
       ...history.slice(-2).map((m) => m.content),
-      'POST',
+      ...TAIL,
     ]);
   });
 
@@ -1241,13 +1345,15 @@ describe('assemblePrompt - author note', () => {
       userName: '민준',
       authorNote,
       trailingTurns: 1,
+      ...atDepth,
     });
     // With the partial re-attached last, the note is still four from the end.
     expect(messages.map((m) => m.content)).toEqual([
+      NEW_CHAT_SEPARATOR,
       ...longer.slice(0, 2).map((m) => m.content),
       '민준는 지금 초조하다.',
       ...longer.slice(2, -1).map((m) => m.content),
-      'POST',
+      ...TAIL,
     ]);
   });
 
@@ -1265,11 +1371,7 @@ describe('assemblePrompt - author note', () => {
 
   it('outlives the examples and the history it evicts', () => {
     const note = '민준는 지금 초조하다.';
-    const budget =
-      countTokens(assemble(100_000).system) +
-      countTokens('POST') +
-      countTokens(note) +
-      countTokens(history[3]!.content);
+    const budget = assemble(100_000).fixedTokens! + countTokens(note) + countTokens(history[3]!.content);
     const { messages } = assemblePrompt({
       plot,
       characters: [aria],
@@ -1280,7 +1382,8 @@ describe('assemblePrompt - author note', () => {
       maxResponseTokens: 0,
       authorNote,
     });
-    expect(messages.map((m) => m.content)).toEqual([note, history[3]!.content, 'POST']);
+    // RisuAI's author's-note slot, after the global note, without settings of the chat's.
+    expect(messages.map((m) => m.content)).toEqual([history[3]!.content, 'POST', note, REMINDER]);
   });
 });
 
@@ -1309,25 +1412,28 @@ describe('assemblePrompt - author note settings', () => {
   const contents = (messages: { content: unknown }[]) => messages.map((m) => m.content);
 
   it('sits at the depth the chat sets, where depth lore of that depth would', () => {
+    // Depth 0 goes with what follows the chat, as depth-0 lore does.
     expect(contents(sent({ authorNoteSettings: { depth: 0 } }))).toEqual([
+      NEW_CHAT_SEPARATOR,
       ...turns.map((m) => m.content),
+      ...TAIL,
       note,
-      'POST',
     ]);
     expect(contents(sent({ authorNoteSettings: { depth: 1 } }))).toEqual([
+      NEW_CHAT_SEPARATOR,
       ...turns.slice(0, 5).map((m) => m.content),
       note,
       'u3',
-      'POST',
+      ...TAIL,
     ]);
     // Same slot as a depth-2 lore entry, after it.
     const withLore = sent({
       authorNoteSettings: { depth: 2 },
       characters: [{ name: '아리아', card: { ...bareCard, lorebook: [loreEntry({ content: 'DEPTH2', depth: 2 })] } }],
     });
-    expect(contents(withLore).slice(4, 7)).toEqual(['DEPTH2', note, 'a2']);
-    // Deeper than the history: its start.
-    expect(contents(sent({ authorNoteSettings: { depth: 9999 } }))[0]).toBe(note);
+    expect(contents(withLore).slice(5, 8)).toEqual(['DEPTH2', note, 'a2']);
+    // Deeper than the history: its start, after the separator.
+    expect(contents(sent({ authorNoteSettings: { depth: 9999 } })).slice(0, 2)).toEqual([NEW_CHAT_SEPARATOR, note]);
   });
 
   it('goes in under the role the chat sets', () => {
@@ -1337,11 +1443,15 @@ describe('assemblePrompt - author note settings', () => {
     }
   });
 
-  it('keeps the old placement with no settings: depth 4, every turn, system', () => {
+  it("goes in RisuAI's author's-note slot with no settings: after the global note, every turn, system", () => {
     const plain = sent();
-    expect(contents(plain)).toEqual(contents(sent({ authorNoteSettings: { depth: 4, frequency: 1, role: 'system' } })));
-    expect(contents(plain).indexOf(note)).toBe(turns.length - AUTHOR_NOTE_DEPTH);
+    expect(contents(plain)).toEqual([NEW_CHAT_SEPARATOR, ...turns.map((m) => m.content), 'POST', note, REMINDER]);
     expect(plain.find((m) => m.content === note)?.role).toBe('system');
+    // Settings of any kind are SillyTavern's placement, with its defaults: depth 4, every turn, system.
+    const defaults = sent({ authorNoteSettings: {} });
+    expect(contents(defaults)).toEqual(contents(sent({ authorNoteSettings: { depth: 4, frequency: 1, role: 'system' } })));
+    expect(contents(defaults).indexOf(note)).toBe(1 + turns.length - AUTHOR_NOTE_DEPTH);
+    expect(defaults.find((m) => m.content === note)?.role).toBe('system');
   });
 
   it('is inserted every N of the reader messages, as SillyTavern counts them', () => {
@@ -1398,29 +1508,30 @@ describe('assemblePrompt - old status windows and choices', () => {
 
   it('sends only the newest assistant turn with its state, and user turns untouched', () => {
     expect(assembleStated().messages.map((m) => m.content)).toEqual([
+      NEW_CHAT_SEPARATOR,
       '첫 장면.',
       stated[1]!.content,
       stated[2]!.content,
       stated[3]!.content,
-      'POST',
+      ...TAIL,
     ]);
   });
 
   it('still scans the stripped state for lore', () => {
     const prompt = assembleStated([loreEntry({ content: '왕궁의 비밀', constant: false, keys: ['왕궁'] })]);
     expect(movedLoreOf(prompt)).toBe('왕궁의 비밀');
-    expect(promptText(prompt.messages[0]!.content)).toBe('첫 장면.');
+    expect(sentAs(prompt, 'history')[0]).toBe('첫 장면.');
   });
 
   it('keeps a turn whole when its state is all it says', () => {
-    const { messages } = assemblePrompt({
+    const prompt = assemblePrompt({
       plot,
       characters: [bareAria],
       history: [{ role: 'assistant', content: status('왕궁') }, ...stated.slice(2)],
       preset,
       userName: '민준',
     });
-    expect(messages[0]!.content).toBe(status('왕궁'));
+    expect(sentAs(prompt, 'history')[0]).toBe(status('왕궁'));
   });
 });
 
@@ -1457,7 +1568,7 @@ describe('assemblePrompt - clock, seed and lore records', () => {
     });
     // Held by its window, a keyword entry is still keyword lore: after the newest turn.
     expect(movedLoreOf(result)).toBe('STICKY');
-    expect(result.system).toContain('FRESH');
+    expect(sentAs(result, 'lorebook')).toEqual(['FRESH']);
     expect(result.loreTriggers).toEqual([loreEntryKey(fresh)]);
   });
 });
@@ -1473,7 +1584,7 @@ describe('assemblePrompt - scene cast', () => {
     },
   };
 
-  it("takes an absent member's block, examples and lorebook out, and names them once", () => {
+  it("takes an absent member's description, examples and lorebook out", () => {
     const { system, messages } = assemblePrompt({
       plot,
       characters: [aria, { ...minsu, absent: true }],
@@ -1481,11 +1592,10 @@ describe('assemblePrompt - scene cast', () => {
       preset,
       userName: '민준',
     });
-    expect(system).not.toContain(characterHeader('민수'));
-    expect(system).not.toContain('MINSU LORE');
-    expect(messages.map((m) => promptText(m.content)).join('\n')).not.toContain('MINSU EXAMPLE');
-    // Right behind the members who are still on the stage.
-    expect(system).toBe([('MAIN'), NARRATION_NOTE, PLOT_BLOCK, ARIA_BLOCK, absentCastLine(['민수'])].join('\n\n'));
+    // Only the member still on the stage is described and named to the protocol.
+    expect(system).toBe(['MAIN', DESCRIPTION, ...CLOSING].join('\n\n'));
+    const everything = [system, ...messages.map((m) => promptText(m.content))].join('\n');
+    for (const gone of ['여관 주인.', 'MINSU LORE', 'MINSU EXAMPLE']) expect(everything).not.toContain(gone);
   });
 
   it('keeps an absent first member standing in for the work', () => {
@@ -1499,8 +1609,14 @@ describe('assemblePrompt - scene cast', () => {
       preset,
       userName: '민준',
     });
-    expect(system.startsWith('WORK PROMPT')).toBe(true);
-    expect(system).toContain(ARIA_BLOCK);
+    expect(system).toBe(
+      [
+        'WORK PROMPT',
+        // 아리아 is not the first member here, so her card's scenario is her own, ahead of the work's setting.
+        `서리 골짜기의 마녀.\n\nDescription of 아리아: 무뚝뚝하다.\n\n${scenarioLine(`눈보라 치는 밤.\n\n${plot.description}`)}`,
+        ...CLOSING,
+      ].join('\n\n'),
+    );
   });
 });
 
@@ -1527,39 +1643,38 @@ describe('assemblePrompt - report', () => {
 
     expect(systemBlocks.map((block) => block.kind)).toEqual([
       'main',
-      'narration_note',
-      'plot',
-      'character',
-      'absent_cast',
+      'description',
       'persona',
+      'speech_protocol',
+      'narration_note',
     ]);
     expect(systemBlocks.map((block) => block.text).join('\n\n')).toBe(result.system);
-    expect(systemBlocks[3]!.label).toBe('아리아');
     // One block per message, in the same order and with the same text.
     expect(messageBlocks.map((block) => block.text)).toEqual(result.messages.map((m) => promptText(m.content)));
     expect(messageBlocks.map((block) => block.kind)).toEqual([
       'examples',
       'examples',
-      'author_note',
+      'new_chat',
       'history',
       'history',
       'history',
       'depth_lore',
       'history',
+      'global_note',
+      'author_note',
+      'speech_protocol',
       'directions',
-      'post_history',
     ]);
     expect(messageBlocks[0]!.label).toBe('아리아');
     expect(messageBlocks[6]!.label).toBe('depth 1');
 
     expect(report.history).toEqual({ included: 4, total: 4 });
     expect(report.examples).toEqual({ included: 2, total: 2 });
+    // What the budget gave out is every block, as each was counted.
     expect(report.totals).toEqual({
       contextBudget: DEFAULT_CONTEXT_BUDGET,
       responseReserve: 1200,
-      used:
-        countTokens(result.system) +
-        result.messages.reduce((sum, m) => sum + countTokens(promptText(m.content)), 0),
+      used: report.blocks.reduce((sum, block) => sum + block.tokens, 0),
     });
   });
 
@@ -1617,120 +1732,49 @@ describe('assemblePrompt - report', () => {
 });
 
 describe('presets', () => {
-  /** A marker per preset that its authorial voice cannot be missing. */
-  const markers: Record<string, string[]> = {
-    standard: ['2–4 paragraphs', 'five senses and small gestures'],
-    novel: ['3–5 paragraphs', 'The narration lines carry the weight'],
-    concise: ['1–2 paragraphs', 'three sentences', 'messenger'],
-    literary: ['at least two of the five senses', 'metaphor', '2–4 paragraphs'],
-    screenplay: ['Place / Time', '2–5 lines of dialogue'],
-  };
-
-  it('offers the five ids the API validates against', () => {
-    expect(PRESET_IDS).toEqual(['standard', 'novel', 'concise', 'literary', 'screenplay']);
-    expect(PRESETS.standard).toBe(DEFAULT_PRESET);
-    expect(isPresetId('novel')).toBe(true);
-    expect(isPresetId('nope')).toBe(false);
-    expect(getPreset('screenplay')).toBe(PRESETS.screenplay);
-    // An unknown or missing id must never break a generation.
+  it('offers the one built-in id the API validates against, and falls back to it for any other', () => {
+    expect(PRESET_IDS).toEqual(['default']);
+    expect(PRESETS.default).toBe(DEFAULT_PRESET);
+    expect(isPresetId('default')).toBe(true);
+    // The five style presets that were are ids no more, and nothing the prototype holds is one.
+    expect(isPresetId('novel')).toBe(false);
+    expect(isPresetId('toString')).toBe(false);
+    // An unknown, old or missing id must never break a generation.
+    expect(getPreset('screenplay')).toBe(DEFAULT_PRESET);
     expect(getPreset('nope')).toBe(DEFAULT_PRESET);
     expect(getPreset(null)).toBe(DEFAULT_PRESET);
   });
 
-  it('gives every preset its own structural markers', () => {
-    for (const [id, preset] of Object.entries(PRESETS)) {
-      const text = `${preset.main}\n${preset.postHistory}`;
-      for (const marker of markers[id]!) expect(text, id).toContain(marker);
-    }
-    // The voices are distinct texts, not the same prompt under five names.
-    const mains = new Set(Object.values(PRESETS).map((preset) => preset.main));
-    expect(mains.size).toBe(PRESET_IDS.length);
-  });
-
-  it('teaches the same script protocol in every preset', () => {
-    // `speech.ts` renders exactly this shape, so a preset that taught another one
+  it('teaches the script protocol speech.ts reads, whatever the preset', () => {
+    // `speech.ts` renders exactly this shape, so a prompt that taught another one
     // would produce a message the chat cannot attribute to anybody.
-    for (const [id, preset] of Object.entries(PRESETS)) {
-      expect(preset.main, id).toContain('a line that starts with `Name: `');
-      expect(preset.main, id).toContain('*descriptions wrapped in asterisks*');
-      expect(preset.main, id).toContain('Write the scene, setting and situation on lines with no prefix');
-      expect(preset.main, id).toContain('Several characters may take turns in one reply');
-      expect(preset.postHistory, id).toContain("Write a character's words and actions on `Name: ` lines");
+    const protocol = speechProtocol(['아리아', '민수']);
+    expect(protocol).toContain('a line that starts with `Name: `, the name written exactly as one of: 아리아, 민수');
+    expect(protocol).toContain('*descriptions wrapped in asterisks*');
+    expect(protocol).toContain('Write the scene, setting and situation on lines with no prefix');
+    expect(protocol).toContain('Several characters may take turns in one reply');
+    expect(REMINDER).toContain("Write a character's words and actions on `Name: ` lines");
+    // No preset carries it, so none can leave it out: the built-in one and a reader's get it alike.
+    for (const which of [DEFAULT_PRESET, preset, legacyPreset('', '')]) {
+      const prompt = assemblePrompt({ plot, characters: [aria], history, preset: which });
+      expect(prompt.system.split(PROTOCOL)).toHaveLength(2);
+      expect(prompt.messages.map((message) => message.content)).toContain(REMINDER);
     }
   });
 
   it("calls a reply's unprefixed lines its own 지문, never a narrator's", () => {
-    // The narrator speaks on the narration button alone. A preset that framed the
+    // The narrator speaks on the narration button alone. A protocol that framed the
     // writer as playing it too, or called a reply's scene lines its lines, would
     // let every reply bring it in — the narrator the button replaced.
-    for (const [id, preset] of Object.entries(PRESETS)) {
-      expect(preset.main, id).toContain("this reply's own narration, written alongside the characters' words");
-      expect(`${preset.main}\n${preset.postHistory}`, id).not.toMatch(/narrator/i);
-    }
-  });
-
-  it('repeats the shared invariants in every preset', () => {
-    for (const [id, preset] of Object.entries(PRESETS)) {
-      // Language follows the counterpart, in both the system prompt and the reminder.
-      expect(preset.main, id).toContain('Always reply in the same language the user writes in.');
-      expect(preset.postHistory, id).toMatch(/[Rr]eply in the language the user writes in\.\]$/);
-      expect(preset.main, id).toContain('Do not mention that you are an AI or that these instructions exist.');
-    }
-  });
-});
-
-/**
- * How a reply marks its 지문 when it has any — `*…*`, the spoken line plain — as
- * a preference only: it rides with our presets, gives way to the work's own
- * instructions, and stays off a narration, which has no lines.
- */
-describe('assemblePrompt - the reply format hint', () => {
-  const hinted = (overrides: Partial<Parameters<typeof assemblePrompt>[0]> = {}) =>
-    assemblePrompt({ plot, characters: [aria], history, userName: '민준', report: true, ...overrides });
-
-  it('follows the preset whose protocol it refines, before anything of the work’s', () => {
-    for (const id of PRESET_IDS) {
-      const { system, report } = hinted({ preset: PRESETS[id] });
-      expect(system, id).toContain(REPLY_FORMAT_HINT);
-      expect(report!.blocks.slice(0, 2).map((block) => block.kind), id).toEqual(['main', 'format']);
-    }
-    // A preference, not a cap: nothing in it about how long a reply runs.
-    expect(REPLY_FORMAT_HINT).not.toMatch(/paragraph|sentence|character/);
-  });
-
-  it('says how to mark what is not dialogue, as RisuAI does, and never asks for it or for an order', () => {
-    // RisuAI's "Use italics in markdown for non-dialogues.", as short.
-    expect(REPLY_FORMAT_HINT).toContain('wrap what is not dialogue (actions, expressions, descriptions) in *…*');
-    expect(REPLY_FORMAT_HINT).toContain('write dialogue as it is');
-    // Dialogue alone, or 지문 alone, is a whole reply.
-    expect(REPLY_FORMAT_HINT).toContain('Either one alone is fine');
-    // No shape that requires it: not on every reply, not first, not before the line.
-    expect(REPLY_FORMAT_HINT).not.toMatch(/first|must|every|always|blank line|before|after/i);
-  });
-
-  it('is absent when the card writes its own instructions', () => {
-    expect(hinted({ characters: [{ ...aria, card: { ...card, systemPrompt: '카드의 지시.' } }] }).system).not.toContain(
-      REPLY_FORMAT_HINT,
-    );
-    expect(
-      hinted({ characters: [{ ...aria, card: { ...card, postHistoryInstructions: '카드의 마무리 지시.' } }] }).system,
-    ).not.toContain(REPLY_FORMAT_HINT);
-  });
-
-  it("is on a member's own turn in a round, a reply like any other", () => {
-    const kai: PromptCharacter = { name: '카이', card: { ...card, name: '카이' } };
-    expect(hinted({ characters: [aria, kai], speaker: 1 }).system).toContain(REPLY_FORMAT_HINT);
-  });
-
-  it('stays out of a prompt built on a preset of someone else’s', () => {
-    expect(hinted({ preset }).system).not.toContain(REPLY_FORMAT_HINT);
+    expect(PROTOCOL).toContain("this reply's own narration, written alongside the characters' words");
+    expect(`${PROTOCOL}\n${REMINDER}`).not.toMatch(/narrator/i);
   });
 });
 
 describe('assemblePrompt - stage directions', () => {
   const directions = '주사위 3. {{user}}의 자물쇠 따기는 실패한다.';
 
-  it('injects the ruling right after the newest turn, leaving everything before it alone', () => {
+  it('injects the ruling after the newest turn and what follows it, leaving everything before it alone', () => {
     const plain = assemble(100_000);
     const { system, messages } = assemblePrompt({
       plot,
@@ -1746,11 +1790,12 @@ describe('assemblePrompt - stage directions', () => {
     // to the newest — must be byte for byte what a turn without directions would
     // have sent, so the provider's cache serves it either way.
     expect(system).toBe(plain.system);
-    expect(messages.slice(0, -2)).toEqual(plain.messages.slice(0, -1));
-    expect(messages.slice(-3)).toEqual([
+    expect(messages.slice(0, -1)).toEqual(plain.messages);
+    expect(messages.slice(-4)).toEqual([
       { role: 'user', content: history[3]!.content },
-      { role: 'system', content: '[Game ruling]\n주사위 3. 민준의 자물쇠 따기는 실패한다.' },
       { role: 'system', content: 'POST' },
+      { role: 'system', content: REMINDER },
+      { role: 'system', content: '[Game ruling]\n주사위 3. 민준의 자물쇠 따기는 실패한다.' },
     ]);
   });
 
@@ -1773,6 +1818,7 @@ describe('assemblePrompt - stage directions', () => {
     const budget =
       countTokens(assemble(100_000).system) +
       countTokens('POST') +
+      countTokens(REMINDER) +
       countTokens(block) +
       countTokens(history[3]!.content);
     const { messages } = assemblePrompt({
@@ -1785,7 +1831,7 @@ describe('assemblePrompt - stage directions', () => {
       maxResponseTokens: 0,
       directions,
     });
-    expect(messages.map((m) => m.content)).toEqual([history[3]!.content, block, 'POST']);
+    expect(messages.map((m) => m.content)).toEqual([history[3]!.content, ...TAIL, block]);
   });
 });
 
@@ -1804,8 +1850,8 @@ describe('assemblePrompt - attached images', () => {
       preset,
       userName: '민준',
     });
-    // The three history turns, between the examples and the post-history block.
-    const turns = messages.slice(-4, -1);
+    // The three history turns, between the separator and what follows the chat.
+    const turns = messages.slice(-3 - TAIL.length, -TAIL.length);
     // The turns without images are the plain strings they have always been.
     expect(turns.slice(0, 2).map((message) => message.content)).toEqual(['이 사진 봐', '어떤 사진?']);
     expect(turns[2]).toEqual({
@@ -1828,7 +1874,7 @@ describe('assemblePrompt - attached images', () => {
     // Exactly enough for the last turn once its two images are charged, so
     // everything ahead of it is what the budget gives up.
     const room =
-      budget(shown) + countTokens('POST') + countTokens('민준의 방') + 2 * IMAGE_TOKEN_ESTIMATE;
+      budget(shown) + countTokens('POST') + countTokens(REMINDER) + countTokens('민준의 방') + 2 * IMAGE_TOKEN_ESTIMATE;
     const { messages } = assemblePrompt({
       plot,
       characters: [aria],
@@ -1838,7 +1884,7 @@ describe('assemblePrompt - attached images', () => {
       contextBudget: room,
       maxResponseTokens: 0,
     });
-    expect(messages.map((message) => promptText(message.content))).toEqual(['민준의 방', 'POST']);
+    expect(messages.map((message) => promptText(message.content))).toEqual(['민준의 방', ...TAIL]);
   });
 });
 
@@ -1861,7 +1907,8 @@ describe('assemblePrompt - narration', () => {
 
   it('carries a narrating turn as a labelled user turn without its prefix', () => {
     const { messages } = assembleNarrated(narrated);
-    expect(messages.slice(0, 3)).toEqual([
+    expect(messages.slice(0, 4)).toEqual([
+      { role: 'system', content: NEW_CHAT_SEPARATOR },
       { role: 'assistant', content: '첫 번째 인사말입니다.' },
       { role: 'user', content: `${NARRATION_HEADER} 문이 열리고 바람이 들이쳤다.` },
       { role: 'user', content: '누구세요?' },
@@ -1871,7 +1918,7 @@ describe('assemblePrompt - narration', () => {
 
   it('expands macros in the narration body against the plot', () => {
     const { messages } = assembleNarrated([{ role: 'user', content: '@:  {{char}}의 첫 밤.' }]);
-    expect(messages[0]).toEqual({
+    expect(messages[1]).toEqual({
       role: 'user',
       content: `${NARRATION_HEADER} 서리 골짜기의 밤의 첫 밤.`,
     });
@@ -1879,7 +1926,7 @@ describe('assemblePrompt - narration', () => {
 
   it('labels an assistant narration the same way, because the role does not decide', () => {
     const { messages } = assembleNarrated([{ role: 'assistant', content: '@: 눈이 그쳤다.' }]);
-    expect(messages[0]).toEqual({ role: 'assistant', content: `${NARRATION_HEADER} 눈이 그쳤다.` });
+    expect(messages[1]).toEqual({ role: 'assistant', content: `${NARRATION_HEADER} 눈이 그쳤다.` });
   });
 
   it('prefixes a generated narration exactly once, whatever the model wrote', () => {
@@ -1915,7 +1962,8 @@ describe('assemblePrompt - a turn a script wrote as its character', () => {
       { role: 'assistant', content: '*문을 열며* 들어와.\n\n카이: 나도 있어.\n{{user}}, 춥지?', speaker: '아리아' },
       { role: 'assistant', content: '눈이 그쳤다.' },
     ]);
-    expect(messages.slice(0, 3)).toEqual([
+    expect(messages.slice(0, 4)).toEqual([
+      { role: 'system', content: NEW_CHAT_SEPARATOR },
       { role: 'user', content: '누구세요?' },
       // A line that already names someone on the roster stays theirs; a blank line stays spacing.
       { role: 'assistant', content: '아리아: *문을 열며* 들어와.\n\n카이: 나도 있어.\n아리아: 민준, 춥지?' },
@@ -1929,7 +1977,8 @@ describe('assemblePrompt - a turn a script wrote as its character', () => {
       { role: 'assistant', content: '@: 바람이 분다.', speaker: '아리아' },
       { role: 'user', content: '응', speaker: '아리아' },
     ]);
-    expect(messages.slice(0, 3)).toEqual([
+    expect(messages.slice(0, 4)).toEqual([
+      { role: 'system', content: NEW_CHAT_SEPARATOR },
       { role: 'assistant', content: '아리아: 고친 글' },
       { role: 'assistant', content: `${NARRATION_HEADER} 바람이 분다.` },
       { role: 'user', content: '응' },
@@ -1948,39 +1997,46 @@ describe('assemblePrompt - narrator', () => {
       maxResponseTokens: 0,
       ...input,
     });
+  /** What the narrator turn says, or '' when there is none. */
+  const narratorOf = (input: Partial<Parameters<typeof assemblePrompt>[0]>): string =>
+    sentAs(assembleWith(input), 'narrator').join('\n\n');
 
   it('says nothing about a narrator the plot never set', () => {
-    expect(assembleWith({}).system).not.toContain('Narrative style');
-    expect(assembleWith({}).system).not.toContain('Point of view');
+    const prompt = assembleWith({});
+    expect(sentAs(prompt, 'narrator')).toEqual([]);
+    for (const text of [prompt.system, ...prompt.messages.map((message) => promptText(message.content))]) {
+      expect(text).not.toContain('Narrative style');
+      expect(text).not.toContain('Point of view');
+    }
   });
 
-  it('carries the voice and the point of view after the roster blocks', () => {
-    const { system } = assembleWith({
+  it('carries the voice and the point of view with what follows the chat, never in the cached prefix', () => {
+    const prompt = assembleWith({
       plot: { ...plot, narrator: { voice: '{{char}}를 멀리서 지켜보는 건조한 문장.', pov: 'third' } },
     });
-    const sections = system.split('\n\n');
     // The narrator is the plot's, so its macros resolve against the plot. The
     // labels name the prose, not a narrator: they govern a reply's 지문 as well.
-    expect(sections).toContain(
+    expect(sentAs(prompt, 'narrator')).toEqual([
       `Narrative style: 서리 골짜기의 밤를 멀리서 지켜보는 건조한 문장.\nPoint of view: ${NARRATOR_POV_LABELS.third}`,
-    );
-    expect(system.indexOf('Narrative style')).toBeGreaterThan(system.indexOf('서리 골짜기의 마녀.'));
+    ]);
+    expect(prompt.system).not.toContain('Narrative style');
+    // RisuAI has no place for it: it goes after the global note and the reminder.
+    expect(prompt.messages.map((message) => promptText(message.content)).slice(-3, -1)).toEqual(TAIL);
+    expect(prompt.sources!.at(-1)!.kind).toBe('narrator');
   });
 
   it('carries either field on its own', () => {
-    const voiced = assembleWith({ plot: { ...plot, narrator: { voice: '짧게 끊어 쓴다.' } } }).system;
-    expect(voiced).toContain('Narrative style: 짧게 끊어 쓴다.');
-    expect(voiced).not.toContain('Point of view');
+    const voiced = narratorOf({ plot: { ...plot, narrator: { voice: '짧게 끊어 쓴다.' } } });
+    expect(voiced).toBe('Narrative style: 짧게 끊어 쓴다.');
 
-    const { system } = assembleWith({ plot: { ...plot, narrator: { pov: 'first' } } });
-    expect(system).toContain(`Point of view: ${NARRATOR_POV_LABELS.first}`);
-    expect(system).not.toContain('Narrative style');
+    expect(narratorOf({ plot: { ...plot, narrator: { pov: 'first' } } })).toBe(
+      `Point of view: ${NARRATOR_POV_LABELS.first}`,
+    );
   });
 
   it('names each point of view in the prompt', () => {
     for (const pov of NARRATOR_POVS) {
-      const { system } = assembleWith({ plot: { ...plot, narrator: { pov } } });
-      expect(system).toContain(`Point of view: ${NARRATOR_POV_LABELS[pov]}`);
+      expect(narratorOf({ plot: { ...plot, narrator: { pov } } })).toBe(`Point of view: ${NARRATOR_POV_LABELS[pov]}`);
     }
     expect(NARRATOR_POV_LABELS['third-limited']).toBe(
       'third-person limited (narrated within what one point-of-view character observes or feels)',
@@ -1992,12 +2048,12 @@ describe('assemblePrompt - narrator', () => {
       ...plot,
       narrator: { voice: '플롯의 문체.', pov: 'third' as const },
     };
-    const { system } = assembleWith({ plot: narrating, narrator: { pov: 'omniscient' } });
-    expect(system).toContain(`Point of view: ${NARRATOR_POV_LABELS.omniscient}`);
     // The override is the narrator now — the plot's voice does not leak into it.
-    expect(system).not.toContain('플롯의 문체.');
+    expect(narratorOf({ plot: narrating, narrator: { pov: 'omniscient' } })).toBe(
+      `Point of view: ${NARRATOR_POV_LABELS.omniscient}`,
+    );
     // …and no override leaves the plot's own in force.
-    expect(assembleWith({ plot: narrating }).system).toContain('Narrative style: 플롯의 문체.');
+    expect(narratorOf({ plot: narrating })).toContain('Narrative style: 플롯의 문체.');
   });
 });
 
@@ -2013,24 +2069,25 @@ describe('assemblePrompt - style', () => {
     });
 
   it('says nothing about a plot whose style sets nothing', () => {
-    expect(assembleWith({}).system).not.toContain(STYLE_DIRECTIVES_HEADER);
-    expect(assemblePrompt({ plot, characters: [bareAria], history, preset }).system).not.toContain(
-      STYLE_DIRECTIVES_HEADER,
-    );
+    expect(sentAs(assembleWith({}), 'style')).toEqual([]);
+    expect(sentAs(assemblePrompt({ plot, characters: [bareAria], history, preset }), 'style')).toEqual([]);
   });
 
-  it('rides with the narrator, ahead of the after_char lore', () => {
+  it('rides right behind the narrator, after the lore and the global note', () => {
     const after = loreEntry({ content: 'AFTER_CHAR_LORE', position: 'after_char' });
-    const { system } = assembleWith({ tense: 'past', pacing: 'slow' }, [after]);
-    expect(system).toContain(styleDirectives({ tense: 'past', pacing: 'slow' }));
-    expect(system.indexOf(STYLE_DIRECTIVES_HEADER)).toBeGreaterThan(system.indexOf('Narrative style'));
-    expect(system.indexOf(STYLE_DIRECTIVES_HEADER)).toBeLessThan(system.indexOf('AFTER_CHAR_LORE'));
+    const prompt = assembleWith({ tense: 'past', pacing: 'slow' }, [after]);
+    expect(sentAs(prompt, 'style')).toEqual([styleDirectives({ tense: 'past', pacing: 'slow' })]);
+    expect(prompt.system).not.toContain(STYLE_DIRECTIVES_HEADER);
+    const kinds = prompt.sources!.map((source) => source.kind);
+    expect(kinds.indexOf('style')).toBe(kinds.indexOf('narrator') + 1);
+    expect(kinds.indexOf('style')).toBeGreaterThan(kinds.indexOf('lorebook'));
+    expect(kinds.indexOf('style')).toBeGreaterThan(kinds.indexOf('global_note'));
   });
 
   it('expands the macros in a directive like every other section', () => {
-    const { system } = assembleWith({ difficulty: 'easy' });
-    expect(system).toContain("민준's lead");
-    expect(system).not.toContain('{{user}}');
+    const [style] = sentAs(assembleWith({ difficulty: 'easy' }), 'style');
+    expect(style).toContain("민준's lead");
+    expect(style).not.toContain('{{user}}');
   });
 });
 
@@ -2083,7 +2140,7 @@ describe('assemblePrompt - RisuAI host data', () => {
     expect(system).toContain('[{{setvar::x::1}}또 왔어|]');
   });
 
-  it("reads the card's own fields, the persona and the prompts as CBS", () => {
+  it("reads the card's own fields and the persona as CBS, and the reader's preset as nothing", () => {
     const { system } = assemblePrompt({
       plot: { ...plot, description: '눈 내리는 {{char}}' },
       characters: [
@@ -2097,12 +2154,13 @@ describe('assemblePrompt - RisuAI host data', () => {
         },
       ],
       history,
-      preset: { main: 'MAIN {{user}}', postHistory: 'POST' },
+      preset: legacyPreset('MAIN {{user}}', 'POST'),
       userName: '민준',
       personaText: '{{user}}는 여행자',
     });
     // `{{scenario}}` is the plot's setting, read where it is asked for: in the member's text.
-    expect(system).toContain('[아리아는 차갑다|눈 내리는 아리아|민준는 여행자|MAIN 민준]');
+    // `{{mainprompt}}` is empty: the preset is the reader's text, which no card text reads.
+    expect(system).toContain('[아리아는 차갑다|눈 내리는 아리아|민준는 여행자|]');
   });
 
   it('answers ST field macros, the group and the role of the text', () => {
@@ -2198,7 +2256,7 @@ describe('assemblePrompt - nickname', () => {
     card: { ...card, nickname: '아리', lorebook: [loreEntry({ content: '{{char}}의 로어' })] },
   };
 
-  it("reads {{char}} as the card's nickname in its own text, and keeps the roster name on the headers", () => {
+  it("reads {{char}} as the card's nickname in its own text, and keeps the roster name in the protocol", () => {
     const { system, messages } = assemblePrompt({
       plot,
       characters: [nicknamed],
@@ -2206,12 +2264,13 @@ describe('assemblePrompt - nickname', () => {
       preset,
       userName: '민준',
     });
-    expect(system).toContain(`${characterHeader('아리아 블랑')}\n서리 골짜기의 마녀.\n\nDescription of 아리: 무뚝뚝하다.`);
-    expect(system).toContain('아리의 로어');
-    const examples = messages
-      .map((message) => promptText(message.content))
-      .filter((text) => text.startsWith(exampleHeader('아리아 블랑')));
-    expect(examples[0]).toBe(`${exampleHeader('아리아 블랑')}\n민준: 예시 질문 하나\n아리: 예시 답변 하나`);
+    expect(system).toContain('서리 골짜기의 마녀.\n\nDescription of 아리: 무뚝뚝하다.');
+    expect(system).toContain(speechProtocol(['아리아 블랑']));
+    const texts = messages.map((message) => promptText(message.content));
+    // RisuAI's lorebook place, after the newest turn.
+    expect(texts).toContain('아리의 로어');
+    const examples = texts.filter((text) => text.startsWith(`${NEW_CHAT_SEPARATOR}\n`));
+    expect(examples[0]).toBe(exampleBlock('민준: 예시 질문 하나\n아리: 예시 답변 하나'));
   });
 });
 
@@ -2228,7 +2287,7 @@ describe('assemblePrompt - injections', () => {
     const texts = messages.map((message) => promptText(message.content));
     const newest = texts.indexOf('네 번째 유저 발화입니다.');
     expect(texts[newest - 1]).toBe('{{char}} START');
-    expect(texts.slice(newest + 1)).toEqual(['END', 'POST', 'LAST']);
+    expect(texts.slice(newest + 1)).toEqual(['END', ...TAIL, 'LAST']);
     const injected = messages.filter((message) =>
       ['{{char}} START', 'END', 'LAST'].includes(promptText(message.content)),
     );
@@ -2257,7 +2316,7 @@ describe('assemblePrompt - injections', () => {
       userName: '민준',
       injections: { start: 'S', historyend: 'E' },
     });
-    expect(messages.map((message) => promptText(message.content))).toEqual(['S', 'E', 'POST']);
+    expect(messages.map((message) => promptText(message.content))).toEqual([NEW_CHAT_SEPARATOR, 'S', 'E', ...TAIL]);
   });
 });
 
@@ -2325,20 +2384,26 @@ describe("assemblePrompt - SillyTavern's lore positions", () => {
   ];
 
   it("puts the author's-note lore around the note, a line each, where the note sits", () => {
-    const { system, messages } = assemblePrompt({
+    const input = {
       plot,
       characters: [{ name: '아리아', card: { ...bareCard, lorebook: noteLore } }],
       history: longer,
       preset,
       userName: '민준',
       authorNote: '{{user}}는 지금 초조하다.',
-    });
+    } satisfies Parameters<typeof assemblePrompt>[0];
+    const note = 'AN-TOP\n민준는 지금 초조하다.\nAN-BOTTOM';
+    // RisuAI's place, the preset's author's-note item: after the global note.
+    const { system, messages } = assemblePrompt(input);
     expect(system).not.toContain('AN-');
-    expect(texts(messages)).toEqual([
+    expect(texts(messages)).toEqual([NEW_CHAT_SEPARATOR, ...longer.map((m) => m.content), 'POST', note, REMINDER]);
+    // SillyTavern's depth, where the chat set one.
+    expect(texts(assemblePrompt({ ...input, authorNoteSettings: { depth: 4 } }).messages)).toEqual([
+      NEW_CHAT_SEPARATOR,
       ...longer.slice(0, 2).map((m) => m.content),
-      'AN-TOP\n민준는 지금 초조하다.\nAN-BOTTOM',
+      note,
       ...longer.slice(2).map((m) => m.content),
-      'POST',
+      ...TAIL,
     ]);
   });
 
@@ -2350,7 +2415,8 @@ describe("assemblePrompt - SillyTavern's lore positions", () => {
       preset,
       userName: '민준',
     });
-    expect(messages[2]).toEqual({ role: 'system', content: 'AN-TOP\nAN-BOTTOM' });
+    const at = texts(messages).indexOf('POST') + 1;
+    expect(messages[at]).toEqual({ role: 'system', content: 'AN-TOP\nAN-BOTTOM' });
   });
 
   it('puts the example lore around the examples, named for its book, and evicts it with them', () => {
@@ -2366,24 +2432,25 @@ describe("assemblePrompt - SillyTavern's lore positions", () => {
     } satisfies Parameters<typeof assemblePrompt>[0];
     const roomy = assemblePrompt({ ...input, contextBudget: 100_000 });
     expect(texts(roomy.messages)).toEqual([
-      `${exampleHeader(plot.name)}\nA`,
-      `${exampleHeader(plot.name)}\nB`,
-      `${exampleHeader('아리아')}\n민준: 예시 질문 하나\n아리아: 예시 답변 하나`,
-      `${exampleHeader('아리아')}\n민준: 예시 질문 둘\n아리아: 예시 답변 둘`,
-      `${exampleHeader('아리아')}\nC`,
+      exampleBlock('A'),
+      exampleBlock('B'),
+      ...EXAMPLES,
+      exampleBlock('C'),
+      NEW_CHAT_SEPARATOR,
       ...history.map((m) => m.content),
-      'POST',
+      ...TAIL,
     ]);
-    expect(roomy.system).not.toContain('\nC');
+    expect(roomy.system.split('\n')).not.toContain('C');
 
-    // Room for the system string, the history and the post-history block only.
+    // Room for the system string, the history and what follows it only.
     const budget =
       countTokens(roomy.system) +
       countTokens('POST') +
+      countTokens(REMINDER) +
       history.reduce((sum, turn) => sum + countTokens(turn.content), 0);
     expect(texts(assemblePrompt({ ...input, contextBudget: budget }).messages)).toEqual([
       ...history.map((m) => m.content),
-      'POST',
+      ...TAIL,
     ]);
   });
 
@@ -2442,7 +2509,13 @@ describe('assemblePrompt - what the prompt scripts made of the history', () => {
       preset,
       userName: '민준',
     });
-    expect(messages.map((message) => promptText(message.content))).toEqual(['[가려짐]', '좋아', 'KEY-LORE', 'POST']);
+    expect(messages.map((message) => promptText(message.content))).toEqual([
+      NEW_CHAT_SEPARATOR,
+      '[가려짐]',
+      '좋아',
+      'KEY-LORE',
+      ...TAIL,
+    ]);
   });
 
   it('reads each turn as its own message, as RisuAI does: {{chat_index}} is its index', () => {
@@ -2461,8 +2534,9 @@ describe('assemblePrompt - what the prompt scripts made of the history', () => {
         userName: '민준',
         branch: { length, greeting: { text: '{{chat_index}}', index: -1 } },
       })
-        .messages.slice(0, -1)
-        .map((message) => promptText(message.content));
+        .messages.slice(0, -TAIL.length)
+        .map((message) => promptText(message.content))
+        .filter((text) => text !== NEW_CHAT_SEPARATOR);
     // The greeting is -1 and the turns after it count from 0, the trimmed ones too.
     expect(sent(turns, 4)).toEqual(['-1', '0', '1', '2']);
     expect(sent(turns.slice(2), 4)).toEqual(['1', '2']);
@@ -2482,11 +2556,20 @@ describe('assemblePrompt - messages hidden from the AI', () => {
   it('sends none of a hidden turn, and still counts it where the stored chat is read', () => {
     const { messages, report, risu } = assembleWith(turns, { report: true });
     // The turn after it reads its index on the stored chat, the hidden turn among it.
-    expect(messages.map((message) => promptText(message.content))).toEqual(['인사 0', '대답 2', '보이는 말', 'POST']);
+    expect(messages.map((message) => promptText(message.content))).toEqual([
+      NEW_CHAT_SEPARATOR,
+      '인사 0',
+      '대답 2',
+      '보이는 말',
+      ...TAIL,
+    ]);
     expect(report!.history).toEqual({ included: 3, total: 3 });
-    // Nothing was cut off the front for the request editors: a hidden turn is not dropped history.
-    expect(risu!.fromStart).toBe(true);
-    expect(assembleWith([{ ...turns[0]!, hidden: true }, ...turns.slice(1)]).risu!.fromStart).toBe(true);
+    expect(risu).toEqual({ system: [{ text: assembleWith(turns).system }] });
+    // Nothing was cut off the front: a hidden turn is not dropped history, so
+    // the chat still opens with RisuAI's separator.
+    expect(promptText(assembleWith([{ ...turns[0]!, hidden: true }, ...turns.slice(1)]).messages[0]!.content)).toBe(
+      NEW_CHAT_SEPARATOR,
+    );
   });
 
   it('scans no hidden turn for lore keywords', () => {
@@ -2508,8 +2591,8 @@ describe('assemblePrompt - messages hidden from the AI', () => {
   it('keeps the newest turn the AI reads when the budget is spent, never a hidden one', () => {
     const tail: HistoryMessage[] = [...turns, { role: 'assistant', content: '숨긴 답', hidden: true }];
     const tiny = assembleWith(tail, { contextBudget: 1 });
-    expect(tiny.messages.map((message) => promptText(message.content))).toEqual(['보이는 말', 'POST']);
-    expect(tiny.risu!.fromStart).toBe(false);
+    // No separator either: the turns before it were cut off.
+    expect(tiny.messages.map((message) => promptText(message.content))).toEqual(['보이는 말', ...TAIL]);
   });
 
   it('sends no history at all when every turn is hidden', () => {
@@ -2517,7 +2600,7 @@ describe('assemblePrompt - messages hidden from the AI', () => {
       turns.map((turn) => ({ ...turn, hidden: true })),
       { report: true },
     );
-    expect(messages.map((message) => promptText(message.content))).toEqual(['POST']);
+    expect(messages.map((message) => promptText(message.content))).toEqual([NEW_CHAT_SEPARATOR, ...TAIL]);
     expect(report!.history).toEqual({ included: 0, total: 0 });
   });
 });
@@ -2659,16 +2742,23 @@ describe('assemblePrompt - a RisuAI utility bot', () => {
   it('sends RisuAI’s template for one: the card’s own parts, none of our preset, persona or note', () => {
     const prompt = assemblePrompt({ ...input, characters: [utility] });
     // RisuAI's utility template: description, lore, chat, the card's global note, what goes after everything.
-    expect(prompt.system).toBe([PLOT_BLOCK, ARIA_BLOCK, '[Summary of the story so far]\n둘은 만났다.'].join('\n\n'));
-    for (const gone of ['MAIN', '카드의 시스템 프롬프트', NARRATION_NOTE, REPLY_FORMAT_HINT, '페르소나 설명']) {
+    expect(prompt.system).toBe(DESCRIPTION);
+    for (const gone of ['MAIN', '카드의 시스템 프롬프트', NARRATION_NOTE, PROTOCOL, '페르소나 설명']) {
       expect(prompt.system).not.toContain(gone);
     }
     const texts = prompt.messages.map((message) => promptText(message.content));
-    // The chat whole, then the card's replacement with `{{original}}` as nothing and no protocol reminder,
-    // then what goes after everything. The note and the start triggers' `start` and `historyend` have no place.
-    expect(texts).toEqual([...history.map((turn) => turn.content), '카드의 끝 지시 [] 아리아', 'LAST']);
+    // The memory at the head of the chat, as HypaV3 puts it where no item holds it, the chat whole,
+    // then the card's replacement with `{{original}}` as nothing and no protocol reminder, then what
+    // goes after everything. The note and the start triggers' `start` and `historyend` have no place.
+    expect(texts).toEqual([
+      '[Summary of the story so far]\n둘은 만났다.',
+      NEW_CHAT_SEPARATOR,
+      ...history.map((turn) => turn.content),
+      '카드의 끝 지시 [] 아리아',
+      'LAST',
+    ]);
     expect(prompt.report!.blocks.map((block) => block.kind)).not.toContain('author_note');
-    expect(prompt.risu).toEqual({ memory: expect.any(Object), fromStart: true, utilityBot: true });
+    expect(prompt.risu).toEqual({ system: [{ text: DESCRIPTION }], template: true });
 
     // The same card without the flag is read as it always was.
     const roleplay = assemblePrompt({ ...input, characters: [{ name: '아리아', card: { ...utilityCard, extensions: {} } }] });
@@ -2677,7 +2767,7 @@ describe('assemblePrompt - a RisuAI utility bot', () => {
     expect(roleplay.messages.map((message) => promptText(message.content))).toEqual(
       expect.arrayContaining(['작가 노트', 'START', 'END', 'LAST']),
     );
-    expect(roleplay.risu!.utilityBot).toBeUndefined();
+    expect(roleplay.risu!.template).toBeUndefined();
   });
 
   it('sends no post-history turn when the card has no replacement, and keeps the lore', () => {
@@ -2688,8 +2778,13 @@ describe('assemblePrompt - a RisuAI utility bot', () => {
     };
     const prompt = assemblePrompt({ ...input, characters: [bare] });
     expect(prompt.system).toContain('항상 켜진 설정');
-    expect(prompt.messages.map((message) => promptText(message.content))).toEqual([...history.map((turn) => turn.content), 'LAST']);
-    expect(prompt.sources!.map((source) => source.kind)).not.toContain('post_history');
+    expect(prompt.messages.map((message) => promptText(message.content))).toEqual([
+      '[Summary of the story so far]\n둘은 만났다.',
+      NEW_CHAT_SEPARATOR,
+      ...history.map((turn) => turn.content),
+      'LAST',
+    ]);
+    expect(prompt.sources!.map((source) => source.kind)).not.toContain('global_note');
   });
 
   it('is the asked member’s setting in a work of several, as RisuAI reads it off the character it asks', () => {
@@ -2728,12 +2823,14 @@ describe("assemblePrompt - SillyTavern's WORLD_INFO regex marks (world-info.js g
     ]);
     expect(prompt.tavernLore).toHaveLength(2);
     expect(prompt.tavernLore).toEqual(expect.arrayContaining([{}, { depth: 2 }]));
-    expect(prompt.system).toContain('own lore');
+    // Our own entry goes to RisuAI's lorebook place, after the newest turn; an ST one stays by the description.
+    expect(sentAs(prompt, 'lorebook')).toEqual(['own lore']);
     // Rewritten after the macros, as ST runs the regex on the substituted content.
     const rewritten = await rewriteTavernLore(prompt, upper);
     expect(rewritten.system).toContain('ST BEFORE 민준');
-    expect(rewritten.system).toContain('own lore');
-    expect(rewritten.messages.map((message) => promptText(message.content))).toContain('ST DEEP');
+    const rewrittenTexts = rewritten.messages.map((message) => promptText(message.content));
+    expect(rewrittenTexts).toContain('own lore');
+    expect(rewrittenTexts).toContain('ST DEEP');
     expect(JSON.stringify(rewritten)).not.toMatch(/[\uFDD0-\uFDD2]/);
     expect(rewritten.tavernLore).toBeUndefined();
     // Not asked: the same prompt as ever.
@@ -2758,6 +2855,25 @@ describe("assemblePrompt - SillyTavern's WORLD_INFO regex marks (world-info.js g
     expect(emptied.messages).toHaveLength(prompt.messages.length - 1);
     expect(emptied.sources).toHaveLength(prompt.messages.length - 1);
     expect(emptied.messages.map((message) => promptText(message.content))).not.toContain('');
+  });
+
+  it("takes the template's wrapper of an entry the scripts empty with it", async () => {
+    const onDefault = (lorebook: LoreEntry[], markTavernLore: boolean) =>
+      assemblePrompt({
+        plot: { ...plot, lorebook },
+        characters: [bareAria],
+        history,
+        preset: DEFAULT_PRESET,
+        userName: '민준',
+        markTavernLore,
+      });
+    const prompt = onDefault([stEntry('keep'), stEntry('drop')], true);
+    expect(prompt.system).toContain('[Roleplay Setting]\n');
+    const emptied = await rewriteTavernLore(prompt, (segments) =>
+      Promise.resolve(segments.map((segment) => (segment.text === 'drop' ? '' : segment.text))),
+    );
+    // As if the entry had never been there: no empty `[Roleplay Setting]` block, no blank lines left.
+    expect(emptied.system).toBe(onDefault([stEntry('keep')], false).system);
   });
 
   it('keeps a segment no one rewrote as it was', () => {

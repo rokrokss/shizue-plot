@@ -397,16 +397,6 @@ test('places the user note by depth, frequency and role, which survive a reload'
   await expect(reloaded.getByLabel('역할')).toHaveValue('user');
 });
 
-test('picks a prompt preset that survives a reload', async () => {
-  let sheet = await openSettings();
-  await Promise.all([chatWrite('PATCH'), sheet.getByLabel('프리셋', { exact: true }).selectOption('novel')]);
-
-  await page.reload();
-  sheet = await openSettings();
-  await expect(sheet.getByLabel('프리셋', { exact: true })).toHaveValue('novel');
-  await page.keyboard.press('Escape');
-});
-
 test('turns on recalling past messages, off until then, which survives a reload', async () => {
   let sheet = await openSettings();
   const recall = () => sheet.getByRole('checkbox', { name: '지난 대화 불러오기' });
@@ -421,14 +411,15 @@ test('turns on recalling past messages, off until then, which survives a reload'
   await page.keyboard.press('Escape');
 });
 
-test('adds my own preset on top of the chat preset, picked for the chat across a reload', async () => {
+test('makes my own preset from the default template, picked for the chat across a reload', async () => {
   const name = `내 문체 ${run}`;
   let sheet = await openSettings();
   await sheet.getByRole('button', { name: '내 프리셋 관리' }).click();
   await sheet.getByRole('button', { name: '새 프리셋' }).click();
   await sheet.getByLabel('이름', { exact: true }).fill(name);
-  await sheet.getByLabel('메인 지시 추가').fill(`대사를 짧게 끊는다 ${run}`);
-  await sheet.getByLabel('글로벌 노트').fill(`응답 직전의 노트 ${run}`);
+  // A new preset starts as a copy of the default (OAI2) template; its main item is the first text.
+  await expect(sheet.getByTestId('reader-preset-template')).toBeVisible();
+  await sheet.getByLabel('일반 프롬프트 · 메인 · 시스템').fill(`대사를 짧게 끊는다 ${run}`);
   await Promise.all([
     chatWrite('POST', '/api/reader-presets'),
     sheet.getByRole('button', { name: '저장', exact: true }).click(),
@@ -443,8 +434,6 @@ test('adds my own preset on top of the chat preset, picked for the chat across a
   await page.reload();
   sheet = await openSettings();
   await expect(sheet.getByRole('combobox', { name: '내 프리셋' }).locator('option:checked')).toHaveText(name);
-  // The chat's own preset is untouched by it.
-  await expect(sheet.getByLabel('프리셋', { exact: true })).toHaveValue('novel');
   await page.keyboard.press('Escape');
 });
 
@@ -477,13 +466,13 @@ test('imports a SillyTavern preset where ST sends its prompts, and says which fi
     });
     const notice = sheet.getByTestId('reader-preset-import-notice');
     await expect(notice.locator('li')).toHaveText([
-      'Main Prompt → 메인 지시 추가',
-      'Auxiliary Prompt → 메인 지시 추가',
+      'Main Prompt → 메인 프롬프트',
+      'Auxiliary Prompt → 메인 프롬프트',
       'Post-History Instructions → 글로벌 노트',
-      '그 밖의 프롬프트 1개는 가져오지 않았습니다: 문체',
+      '그 밖의 프롬프트 1개는 보내지 않습니다: 문체',
       '모델·샘플링 등 나머지 설정도 가져오지 않았습니다.',
     ]);
-    await expect(sheet.getByLabel('메인 지시 추가')).toHaveValue(`ST 메인 ${run}\n\n보조 지시 ${run}`);
+    await expect(sheet.getByLabel('메인 프롬프트')).toHaveValue(`ST 메인 ${run}\n\n보조 지시 ${run}`);
     await expect(sheet.getByLabel('글로벌 노트')).toHaveValue(`응답 직전 지시 ${run}`);
     await notice.scrollIntoViewIfNeeded();
     await page.screenshot({ path: 'test-results/reader-preset/import-notice-light.png' });

@@ -5,38 +5,40 @@
  * `sendChat` puts its request together in, with the fields it sets beside
  * `role` and `content`, which cards filter on.
  *
- * What RisuAI's `sendChat` sends, with no prompt template (its default):
+ * RisuAI's `sendChat` sends its blocks in the order of the preset's template —
+ * or, without one, of its `formatingOrder` — and its `pushPrompts` runs system
+ * turns together where their `memo` and `name` agree. The assembler builds the
+ * request the same way (`templateOf`), so the view follows its messages:
  *
- * - its system turns — main prompt, description, lore, persona — run together
- *   into one, with no field;
- * - `chats`: the memory's summary when the memory ran, `{role: 'system', memo:
- *   'supaMemory'}` (HypaV3's and SupaMemory's alike; `hypaMemory` is only the
- *   old hypa mode's extra turn); then for each `<START>` block of the examples
- *   (`exampleMessage`) a `{role: 'system', content: '[Start a new chat]', memo:
- *   'NewChatExample'}` turn and the block's lines as turns of their own —
- *   `{{user}}:` a user turn named `example_user`, `{{char}}:` an assistant turn
- *   named `example_assistant`; then `{role: 'system', content: '[Start a new
- *   chat]', memo: 'NewChat'}` (a fixed text, sent but for NovelAI and a
- *   template's `trimStartNewChat`); then the greeting, `{role: 'assistant'}`;
- *   then each chat message, `memo` its `chatId`, `attr: []`, `thoughts` what its
- *   `<Thoughts>` held and `multimodals` its pictures (absent without any).
- *   RisuAI trims `chats` from the front to fit, so the examples go first, then
- *   the separator, then the greeting and the oldest messages — and the memory,
- *   when it runs, summarizes them away instead. Every turn of `chats` is then
- *   `removable: true` but the memory's, and but the newest, which went to
- *   `lastChat` before that;
- * - the rest — depth lore, author's note, what goes after everything — with no
- *   field (RisuAI marks no lore).
+ * - the leading system turns, which are our system string, as RisuAI's turns
+ *   (`AssembledPrompt.risu.system`) — the memory, `{role: 'system', memo:
+ *   'supaMemory'}`, apart where a template's `memory` item puts it among them;
+ * - `chats`: the memory's summary where no item holds it, at their head; then
+ *   for each `<START>` block of the examples (`exampleMessage`) a `{role:
+ *   'system', content: '[Start a new chat]', memo: 'NewChatExample'}` turn and
+ *   the block's lines as turns of their own — `{{user}}:` a user turn named
+ *   `example_user`, `{{char}}:` an assistant turn named `example_assistant`;
+ *   then `{role: 'system', content: '[Start a new chat]', memo: 'NewChat'}`
+ *   (a fixed text, sent but for NovelAI and a template's `trimStartNewChat`);
+ *   then the greeting, `{role: 'assistant'}`; then each chat message, `memo`
+ *   its `chatId`, `attr: []`, `thoughts` what its `<Thoughts>` held and
+ *   `multimodals` its pictures (absent without any). RisuAI trims `chats` from
+ *   the front to fit, so the examples go first, then the separator, then the
+ *   greeting and the oldest messages — and the memory, when it runs,
+ *   summarizes them away instead. Every turn of `chats` is then `removable:
+ *   true` but the memory's, and but the newest where there is no template,
+ *   which went to `lastChat` before that;
+ * - the rest — the lore, the global note, the depth lore, the author's note,
+ *   what goes after everything — with no field (RisuAI marks no lore).
  *
- * A RisuAI utility bot's request (`isUtilityBot`) is built from RisuAI's utility
- * prompt template instead, which keeps the newest turn among `chats` — removable
- * like the rest — and an empty turn is never sent, its system string included.
+ * An empty turn is never sent, a utility bot's empty system string included.
  *
  * `cachePoint` (Claude's prompt caching) is only set by a prompt template, and
  * `attr: ['nameAdded']` only with a template's `sendName`; `thoughts` is what
  * RisuAI's chain-of-thought option lifts out of a message, which we do not have.
  */
 import {
+  NEW_CHAT_SEPARATOR,
   promptText,
   type AssembledPrompt,
   type ExampleSpeakers,
@@ -70,7 +72,7 @@ export interface RisuRequestExtras {
 export type RisuRequestItem = RequestTurn & RisuRequestExtras;
 
 /** The text of RisuAI's separators, `NewChatExample` and `NewChat`: fixed, not a setting. */
-export const RISU_NEW_CHAT = '[Start a new chat]';
+export const RISU_NEW_CHAT = NEW_CHAT_SEPARATOR;
 
 /**
  * How RisuAI marks the turn a block of ours stands for. `memo: 'chatId'` is the
@@ -80,54 +82,56 @@ export const RISU_NEW_CHAT = '[Start a new chat]';
  * we do not have).
  */
 export interface RisuItemRule {
-  memo?: 'chatId' | 'NewChatExample' | 'supaMemory';
+  memo?: 'chatId' | 'NewChatExample' | 'NewChat' | 'supaMemory';
   removable?: true;
   chat?: true;
 }
 
 /**
  * Our blocks, as the RisuAI turns they stand for (`risuRequestView`). The
- * system string is one turn, as RisuAI's main prompt, description, lore and
- * persona run together into one — but for the memory, which is its own system
- * turn, `supaMemory`, as RisuAI sends its memory's summary. An example block is
- * RisuAI's `<START>` block: the `NewChatExample` turn this marks, then its
- * lines as turns named `example_user` and `example_assistant`. A greeting is a
- * `history` turn without the memo (`risuRequestExtras`), and the newest turn of
- * the chat is not removable (`risuRequestView`).
+ * leading system blocks are the system string's turns, `risu.system`. The
+ * memory is its own system turn, `supaMemory`, as RisuAI sends its memory's
+ * summary. An example block is RisuAI's `<START>` block: the `NewChatExample`
+ * turn this marks, then its lines as turns named `example_user` and
+ * `example_assistant`. A greeting is a `history` turn without the memo
+ * (`risuRequestExtras`), and the newest turn of the chat is not removable
+ * without a template (`risuRequestView`).
  */
 export const RISU_REQUEST_ITEMS: Record<PromptBlockKind, RisuItemRule> = {
-  // Parts of the one system string; never turns of their own.
+  // The preset's and the card's texts, and ours: as RisuAI's system turns, nothing.
   main: {},
-  format: {},
+  preset: {},
+  speech_protocol: {},
   narration_note: {},
   lore_before: {},
-  plot: {},
-  character: {},
-  absent_cast: {},
+  description: {},
   narrator: {},
   style: {},
   lore_after: {},
+  lorebook: {},
   persona: {},
-  // Its own turn, after the system string, and never removable: the summaries
-  // HypaV3's important and recent shares picked.
+  // Its own turn, and never removable: the summaries HypaV3's important and
+  // recent shares picked.
   memory: { memo: 'supaMemory' },
   // Ours alone, after the newest turn: as RisuAI's system turns, nothing.
   directions: {},
   // The separator that opens each block; its lines are removable too, and named.
   examples: { memo: 'NewChatExample', removable: true },
+  new_chat: { memo: 'NewChat', removable: true },
   history: { memo: 'chatId', removable: true, chat: true },
   // RisuAI splices its depth lore in after it marked the chat removable.
   depth_lore: {},
   author_note: {},
-  // The lore keywords brought in, which RisuAI sends in its system lore and we
-  // after the newest turn: a system turn with no memo, never removable.
+  // The lore keywords brought in, which RisuAI sends in its lorebook slot and we
+  // after the newest turn where that slot comes before it: a system turn with
+  // no memo, never removable.
   moved_lore: {},
   // The summaries HypaV3's similar and random shares picked (RisuAI sends them
   // with the rest, in `supaMemory`), the facts and SillyTavern's retrieved
   // messages, which RisuAI has no turn for: after the newest turn, like depth-0
   // lore.
   recall: {},
-  post_history: {},
+  global_note: {},
   // The start triggers' `additonalSysPrompt` turns.
   injection: {},
   // RisuAI's `postEverything` (a group's "[Write the next reply only as …]").
@@ -202,16 +206,12 @@ export function risuExampleSides(text: string, { user, char }: ExampleSpeakers):
 
 /** What an item of `risuRequestView` stands for, so the API can map the request back and report it. */
 export type RisuItemOrigin =
-  /** The system string — without its memory, where it had one. */
-  | { kind: 'system' }
-  /** The memory section of the system string. */
-  | { kind: 'memory' }
+  /** One of the system string's turns (`risu.system[at]`), or the whole of it where it has no turns apart. */
+  | { kind: 'system'; at: number }
   /** `messages[at]`, whole. */
   | { kind: 'message'; at: number }
   /** A separator or a line of the example block `messages[at]`. */
-  | { kind: 'example'; at: number }
-  /** RisuAI's `NewChat` separator, which stands for nothing of ours. */
-  | { kind: 'newChat' };
+  | { kind: 'example'; at: number };
 
 /** `risuRequestView`'s answer: the items, and what each one is of ours. */
 export interface RisuRequestView {
@@ -220,16 +220,12 @@ export interface RisuRequestView {
 }
 
 /**
- * The prompt as the request editors read it: RisuAI's items, in the order
- * RisuAI's request has them as far as ours has them at all — the system string
- * (the memory apart), then RisuAI's `chats` (the memory, each example block
- * split, the `NewChat` separator while the history is sent from the branch's
- * start, the greeting and the messages, with the depth lore, the author's note
- * and the start triggers' turns where the assembler put them), then what
- * follows the newest turn, each its own item: our directions and recall turn,
- * the depth-0 lore, the post-history and what goes after everything. A turn's pictures are its `multimodals`, each
- * `base64` the picture's data URL. A prompt without `risu` or `sources` (one
- * not from the assembler) is its turns as they are.
+ * The prompt as the request editors read it: RisuAI's items, in the order the
+ * assembler built them by the preset — the system string as RisuAI's turns
+ * (`risu.system`), then every message, each its own item, an example block
+ * split into RisuAI's `<START>` turns. A turn's pictures are its
+ * `multimodals`, each `base64` the picture's data URL. A prompt without `risu`
+ * or `sources` (one not from the assembler) is its turns as they are.
  */
 export function risuRequestView(prompt: Pick<AssembledPrompt, 'system' | 'messages' | 'sources' | 'risu'>): RisuRequestView {
   const { messages, sources, risu } = prompt;
@@ -263,39 +259,39 @@ export function risuRequestView(prompt: Pick<AssembledPrompt, 'system' | 'messag
 
   // RisuAI sends no turn with nothing in it (`pushPrompts`) — a utility bot's
   // system string can be empty.
-  const system = risu?.memory?.system ?? prompt.system;
-  if (system) push({ role: 'system', content: system }, { kind: 'system' });
-  let at = 0;
-  if (risu && sources) {
-    if (risu.memory) push({ role: 'system', content: risu.memory.text, ...risuRequestExtras({ kind: 'memory' }) }, { kind: 'memory' });
-    for (; at < messages.length && sources[at]?.kind === 'examples'; at += 1) {
-      const source = sources[at]!;
-      const text = promptText(messages[at]!.content);
-      // The first line is the block's header (`exampleHeader`), which RisuAI's block does not have.
-      const sides = source.speakers
-        ? risuExampleSides(text.slice(text.indexOf('\n') + 1), source.speakers)
-        : [{ role: 'system' as const, content: text }];
-      push({ role: 'system', content: RISU_NEW_CHAT, ...risuRequestExtras(source) }, { kind: 'example', at }, true);
-      for (const side of sides) {
-        push(
-          {
-            role: side.role,
-            content: side.content,
-            ...(side.role === 'system' ? {} : { name: `example_${side.role}` }),
-            removable: true,
-          },
-          { kind: 'example', at },
-          true,
-        );
-      }
+  const turns = risu?.system ?? [{ text: prompt.system }];
+  turns.forEach((turn, at) => {
+    if (turn.text) push({ role: 'system', content: turn.text, ...(turn.memo ? { memo: turn.memo } : {}) }, { kind: 'system', at });
+  });
+  for (let at = 0; at < messages.length; at += 1) {
+    const source = sources?.[at];
+    if (!risu || source?.kind !== 'examples') {
+      whole(at);
+      continue;
     }
-    if (risu.fromStart) push({ role: 'system', content: RISU_NEW_CHAT, memo: 'NewChat', removable: true }, { kind: 'newChat' }, true);
+    const text = promptText(messages[at]!.content);
+    // The first line is the block's own `NewChatExample` separator, which goes as a turn of its own.
+    const sides = source.speakers
+      ? risuExampleSides(text.slice(text.indexOf('\n') + 1), source.speakers)
+      : [{ role: 'system' as const, content: text }];
+    push({ role: 'system', content: RISU_NEW_CHAT, ...risuRequestExtras(source) }, { kind: 'example', at }, true);
+    for (const side of sides) {
+      push(
+        {
+          role: side.role,
+          content: side.content,
+          ...(side.role === 'system' ? {} : { name: `example_${side.role}` }),
+          removable: true,
+        },
+        { kind: 'example', at },
+        true,
+      );
+    }
   }
-  for (; at < messages.length; at += 1) whole(at);
 
   // RisuAI moves the newest turn of `chats` to `lastChat` before it marks the rest
-  // removable — but for a utility bot, whose prompt template keeps it among them.
-  const last = risu?.utilityBot ? undefined : chats.at(-1);
+  // removable — but not under a template, which keeps it among them.
+  const last = risu?.template ? undefined : chats.at(-1);
   if (last !== undefined) {
     const { removable: _marked, ...item } = items[last]!;
     items[last] = item;

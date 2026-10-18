@@ -213,7 +213,7 @@ function fingerprintOf(
         .map((section) => `${section.kind}\u0000${section.text}`)
         .join('\u0001'),
     );
-  const isLore = (kind: PromptBlockKind): boolean => kind === 'lore_before' || kind === 'lore_after';
+  const isLore = (kind: PromptBlockKind): boolean => kind === 'lore_before' || kind === 'lore_after' || kind === 'lorebook';
   const newest = request.messages.findLastIndex((message) => message.role === 'user');
   const upto = newest + 1;
   const sources = request.sources;

@@ -30,10 +30,8 @@ function render(): void {
         children: createElement(ChatSettings, {
           model: 'm1',
           subModel: null,
-          preset: 'standard',
           personaId: null,
           models: [{ id: 'm1', label: '모델 하나' }],
-          presets: [],
           personas: [],
           disabled: false,
           onChange: () => undefined,
@@ -62,7 +60,7 @@ describe('the captions', () => {
 
   it('points each caption at its own control', () => {
     const captions = labels();
-    expect(captions.map((label) => label.textContent)).toEqual(['모델', '보조 모델', '프리셋', '페르소나']);
+    expect(captions.map((label) => label.textContent)).toEqual(['모델', '보조 모델', '페르소나']);
     // The caption is a label of the control below it, not of the page.
     expect(captions.map((label) => label.htmlFor)).toEqual(selects().map((select) => select.id));
     for (const select of selects()) expect(select.id).not.toBe('');
@@ -82,10 +80,8 @@ describe('the reasoning effort', () => {
             model: 'm2',
             subModel: null,
             reasoningEffort: 'low',
-            preset: 'standard',
             personaId: null,
             models: [{ id: 'm2', label: '추론 모델', reasoningEfforts: ['low', 'turbo'], defaultReasoningEffort: 'medium' }],
-            presets: [],
             personas: [],
             disabled: false,
             onChange: (patch) => void patches.push(patch),
@@ -124,10 +120,8 @@ describe('the auxiliary model', () => {
             model: 'm1',
             subModel,
             reasoningEffort: null,
-            preset: 'standard',
             personaId: null,
             models,
-            presets: [],
             personas: [],
             disabled: false,
             onChange: (patch) => void patches.push(patch),

@@ -1,9 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { decodeMsgpack } from '../src/msgpack.js';
-import { groupPreset, REPLY_FORMAT_HINT, SPEECH_PROTOCOL, GROUP_SPEECH_PROTOCOL } from '../src/presets.js';
+import { DEFAULT_PRESET, RISU_DEFAULT_FORMATING_ORDER, speechProtocol, type PromptPreset } from '../src/presets.js';
 import { assemblePrompt, promptText, type AssemblePromptInput, type HistoryMessage, type PromptCharacter } from '../src/prompt.js';
-import { moduleIntegrationNames, presetDefaultVariables, readReaderPresetFile, ReaderPresetImportError } from '../src/readerPreset.js';
+import {
+  moduleIntegrationNames,
+  presetDefaultVariables,
+  readerPromptPreset,
+  readReaderPresetFile,
+  ReaderPresetImportError,
+} from '../src/readerPreset.js';
 import { DEFAULT_LORE_SETTINGS, type LoreEntry, type NormalizedCard } from '../src/types.js';
 
 const json = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
@@ -13,7 +19,7 @@ const fixture = (name: string): Uint8Array => new Uint8Array(readFileSync(new UR
 const everything = (value: unknown): string => JSON.stringify(value);
 
 describe('readReaderPresetFile — RisuAI', () => {
-  it('takes the main prompt, and the jailbreak behind the history ahead of the global note, as RisuAI sends them', async () => {
+  it('keeps a preset without a template as RisuAI sends it: its three texts in its order', async () => {
     const imported = await readReaderPresetFile(
       'mine_preset.json',
       json({
@@ -28,16 +34,21 @@ describe('readReaderPresetFile — RisuAI', () => {
     expect(imported).toEqual({
       source: 'risuai',
       name: '내 프리셋',
+      main: '메인 지시',
+      globalNote: '글로벌 노트',
+      jailbreak: '탈옥 지시',
+      // RisuAI's default order: … chats, lastChat, jailbreak, lorebook, globalNote, …
+      formatingOrder: [...RISU_DEFAULT_FORMATING_ORDER],
+      promptTemplate: null,
+      groupTemplate: '',
+      groupOtherBotRole: 'user',
       toggles: '',
       moduleIntegration: '',
       defaultVariables: '',
-      main: '메인 지시',
-      // RisuAI's default order: … chats, lastChat, jailbreak, lorebook, globalNote, …
-      globalNote: '탈옥 지시\n\n글로벌 노트',
       imported: [
         { kind: 'main', name: '', into: 'main' },
-        { kind: 'jailbreak', name: '', into: 'globalNote' },
         { kind: 'globalNote', name: '', into: 'globalNote' },
+        { kind: 'jailbreak', name: '', into: 'jailbreak' },
       ],
       ignoredPrompts: [],
       ignoredSettings: true,
@@ -59,6 +70,16 @@ describe('readReaderPresetFile — RisuAI', () => {
     expect((await readReaderPresetFile('p.json', json({ mainPrompt: 'm', customPromptTemplateToggle: 'a=b' }))).ignoredSettings).toBe(false);
   });
 
+  it('keeps toggles and default variables whole, however long — a cut would send another prompt', async () => {
+    const long = 'x'.repeat(50_000);
+    const imported = await readReaderPresetFile(
+      'p.json',
+      json({ mainPrompt: 'm', customPromptTemplateToggle: long, templateDefaultVariables: `a=${long}` }),
+    );
+    expect(imported.toggles).toHaveLength(50_000);
+    expect(imported.defaultVariables).toHaveLength(50_002);
+  });
+
   it("keeps the preset's default variables, and reads them under the work's as RisuAI's getChatVar does", async () => {
     // database.svelte.ts saves `templateDefaultVariables` in the preset beside its
     // prompts; chatVar.svelte.ts `getChatVar` reads an unset variable from
@@ -78,100 +99,80 @@ describe('readReaderPresetFile — RisuAI', () => {
     expect(moduleIntegrationNames(null)).toEqual([]);
   });
 
-  it('places the jailbreak by the preset’s own order, and leaves it out where the order never sends it', async () => {
+  it('keeps the preset’s own order, and counts the jailbreak taken only where the order sends it', async () => {
     const preset = (formatingOrder: string[]) =>
       readReaderPresetFile('p.json', json({ mainPrompt: '메인', globalNote: '노트', jailbreak: '탈옥', formatingOrder }));
-    // RisuAI's NAI preset: after the author's note, still ahead of the global note.
-    expect(await preset(['main', 'description', 'chats', 'lastChat', 'lorebook', 'authorNote', 'jailbreak', 'globalNote'])).toMatchObject({
-      main: '메인',
-      globalNote: '탈옥\n\n노트',
-    });
-    expect(await preset(['main', 'chats', 'globalNote', 'jailbreak'])).toMatchObject({ globalNote: '노트\n\n탈옥' });
-    // Ahead of the history: with the main, in the order's sequence.
-    expect(await preset(['main', 'jailbreak', 'description', 'chats', 'globalNote'])).toMatchObject({
-      main: '메인\n\n탈옥',
-      globalNote: '노트',
-      imported: [
-        { kind: 'main', name: '', into: 'main' },
-        { kind: 'jailbreak', name: '', into: 'main' },
-        { kind: 'globalNote', name: '', into: 'globalNote' },
-      ],
-    });
-    const unsent = await preset(['main', 'chats', 'globalNote']);
-    expect(unsent).toMatchObject({ main: '메인', globalNote: '노트' });
-    expect(everything(unsent)).not.toContain('탈옥');
+    // RisuAI's NAI preset order, kept as it is.
+    const nai = ['main', 'description', 'chats', 'lastChat', 'lorebook', 'authorNote', 'jailbreak', 'globalNote'];
+    expect(await preset(nai)).toMatchObject({ formatingOrder: nai, main: '메인', globalNote: '노트', jailbreak: '탈옥' });
+    // An order that never sends the jailbreak: kept, but not counted as taken.
+    const unsent = await preset(['main', 'chats', 'globalNote', 'nonsense', 'main']);
+    expect(unsent.formatingOrder).toEqual(['main', 'chats', 'globalNote']);
+    expect(unsent.imported.map((part) => part.kind)).toEqual(['main', 'globalNote']);
   });
 
-  it('reads a template preset from its items, as RisuAI sends one — never its stale fields', async () => {
-    const imported = await readReaderPresetFile(
-      'template.json',
-      json({
-        mainPrompt: 'STALE-MAIN',
-        globalNote: 'STALE-NOTE',
-        jailbreak: 'JB-TOP',
-        promptTemplate: [
-          { type: 'plain', type2: 'main', text: '첫 메인', role: 'system' },
-          { type: 'jailbreak', type2: 'normal', text: '앞 탈옥', role: 'system', name: '탈옥' },
-          { type: 'plain', type2: 'normal', text: '문체', role: 'system', name: '문체' },
-          { type: 'chat', rangeStart: 0, rangeEnd: 'end' },
-          { type: 'jailbreak', type2: 'normal', text: '뒤 탈옥', role: 'system', name: '' },
-          { type: 'jailbreak', type2: 'normal', text: 'USER-JB', role: 'user', name: '사용자 탈옥' },
-          { type: 'plain', type2: 'globalNote', text: '노트', role: 'system' },
-          { type: 'plain', type2: 'main', text: 'PREFILL', role: 'bot', name: '프리필' },
-          { type: 'authornote', innerFormat: '[{{slot}}]', name: '작가 노트' },
-          { type: 'plain', type2: 'main', text: '둘째 메인' },
-        ],
-      }),
-    );
-    expect(imported).toMatchObject({
-      name: 'template',
-      // A jailbreak item goes with the main ahead of the first chat, with the note after it.
-      main: '첫 메인\n\n앞 탈옥\n\n둘째 메인',
-      globalNote: '뒤 탈옥\n\n노트',
-      imported: [
-        { kind: 'main', name: '', into: 'main' },
-        { kind: 'jailbreak', name: '탈옥', into: 'main' },
-        { kind: 'jailbreak', name: '', into: 'globalNote' },
-        { kind: 'globalNote', name: '', into: 'globalNote' },
-        { kind: 'main', name: '', into: 'main' },
-      ],
-      ignoredPrompts: ['문체', '사용자 탈옥', '프리필', '작가 노트'],
-      ignoredSettings: true,
-    });
-    for (const gone of ['STALE-MAIN', 'STALE-NOTE', 'JB-TOP', 'USER-JB', 'PREFILL']) {
-      expect(everything(imported)).not.toContain(gone);
-    }
+  it('keeps a template preset whole, as RisuAI sends one', async () => {
+    const promptTemplate = [
+      { type: 'plain', type2: 'main', text: '첫 메인', role: 'system' },
+      { type: 'jailbreak', type2: 'normal', text: '앞 탈옥', role: 'system', name: '탈옥' },
+      { type: 'plain', type2: 'normal', text: '문체', role: 'system', name: '문체' },
+      { type: 'chat', rangeStart: 0, rangeEnd: 'end' },
+      { type: 'jailbreak', type2: 'normal', text: 'USER-JB', role: 'user', name: '사용자 탈옥' },
+      { type: 'plain', type2: 'globalNote', text: '노트', role: 'system' },
+      { type: 'plain', type2: 'main', text: 'PREFILL', role: 'assistant', name: '프리필' },
+      { type: 'authornote', innerFormat: '[{{slot}}]', name: '작가 노트' },
+      { type: 'chatML', text: '<|im_start|>system\nX<|im_end|>', name: 'ChatML' },
+      { type: 'mystery', text: '모르는 항목' },
+    ];
+    const imported = await readReaderPresetFile('template.json', json({ mainPrompt: 'STALE-MAIN', promptTemplate }));
+    expect(imported.promptTemplate).toEqual([
+      { type: 'plain', type2: 'main', text: '첫 메인', role: 'system' },
+      { type: 'jailbreak', type2: 'normal', text: '앞 탈옥', role: 'system', name: '탈옥' },
+      { type: 'plain', type2: 'normal', text: '문체', role: 'system', name: '문체' },
+      { type: 'chat', rangeStart: 0, rangeEnd: 'end' },
+      { type: 'jailbreak', type2: 'normal', text: 'USER-JB', role: 'user', name: '사용자 탈옥' },
+      { type: 'plain', type2: 'globalNote', text: '노트', role: 'system' },
+      // RisuAI's `normalizePromptRole`: an assistant is the bot.
+      { type: 'plain', type2: 'main', text: 'PREFILL', role: 'bot', name: '프리필' },
+      { type: 'authornote', innerFormat: '[{{slot}}]', name: '작가 노트' },
+      { type: 'chatML', text: '<|im_start|>system\nX<|im_end|>', name: 'ChatML' },
+    ]);
+    expect(imported.imported).toEqual([
+      { kind: 'main', name: '', into: 'template' },
+      { kind: 'jailbreak', name: '탈옥', into: 'template' },
+      { kind: 'normal', name: '문체', into: 'template' },
+      { kind: 'jailbreak', name: '사용자 탈옥', into: 'template' },
+      { kind: 'globalNote', name: '', into: 'template' },
+      { kind: 'main', name: '프리필', into: 'template' },
+    ]);
+    // Kept but not sent yet.
+    expect(imported.ignoredPrompts).toEqual(['ChatML']);
+    // RisuAI keeps the fields a template stands in for; so does the import, which sends none of them.
+    expect(imported.main).toBe('STALE-MAIN');
   });
 
   it('opens a .risup as RisuAI exports it (RPack, deflate, MessagePack, AES-GCM)', async () => {
     // Written by msgpackr 1.10.1 — RisuAI's own — through `downloadPreset`'s steps.
     const imported = await readReaderPresetFile('테스트_preset.risup', fixture('reader-preset.risup'));
-    expect(imported).toEqual({
-      source: 'risuai',
-      name: '테스트 프리셋',
-      toggles: '',
-      moduleIntegration: '',
-      defaultVariables: '',
-      // The template's jailbreak item comes before its chat.
-      main: 'MAIN-ONE {{char}}와 {{user}}의 이야기를 씁니다.\n\nJB-ITEM-SECRET\n\nMAIN-TWO 두 번째 메인',
-      globalNote: 'NOTE-ONE 응답 직전의 노트',
-      imported: [
-        { kind: 'main', name: '메인', into: 'main' },
-        { kind: 'jailbreak', name: '탈옥', into: 'main' },
-        { kind: 'globalNote', name: '', into: 'globalNote' },
-        { kind: 'main', name: '', into: 'main' },
-      ],
-      ignoredPrompts: ['문체', 'CoT', '프리필'],
-      ignoredSettings: true,
-    });
-    // The fields a template stands in for are never read.
-    expect(everything(imported)).not.toMatch(/JB-(?!ITEM-SECRET)|STALE-|PREFILL/);
+    expect(imported).toMatchObject({ source: 'risuai', name: '테스트 프리셋', ignoredPrompts: ['CoT'], ignoredSettings: true });
+    expect(imported.promptTemplate?.map((item) => item.type)).toEqual([
+      'plain',
+      'jailbreak',
+      'plain',
+      'description',
+      'chat',
+      'plain',
+      'cot',
+      'plain',
+      'plain',
+    ]);
+    expect(imported.promptTemplate?.[0]).toMatchObject({ type2: 'main', name: '메인', text: 'MAIN-ONE {{char}}와 {{user}}의 이야기를 씁니다.' });
   });
 
   it('opens the older .risupreset, which is not RPacked and keeps its preset under `pres`', async () => {
     const imported = await readReaderPresetFile('old.risupreset', fixture('reader-preset-v0.risupreset'));
-    expect(imported.main).toContain('MAIN-ONE');
-    expect(imported.imported.map((part) => part.kind)).toEqual(['main', 'jailbreak', 'globalNote', 'main']);
+    expect(imported.promptTemplate?.[0]).toMatchObject({ text: expect.stringContaining('MAIN-ONE') });
+    expect(imported.imported.map((part) => part.kind)).toEqual(['main', 'jailbreak', 'normal', 'globalNote', 'main', 'main']);
   });
 
   it('refuses what is not a preset, and says which kind of refusal', async () => {
@@ -222,11 +223,17 @@ describe('readReaderPresetFile — SillyTavern', () => {
     expect(imported).toEqual({
       source: 'sillytavern',
       name: 'Celia v4',
+      main: 'ST 메인 {{char}}',
+      globalNote: 'PHI 응답 직전',
+      jailbreak: '',
+      // RisuAI's default order sends the global note after the history, as ST sends Post-History Instructions.
+      formatingOrder: [...RISU_DEFAULT_FORMATING_ORDER],
+      promptTemplate: null,
+      groupTemplate: '',
+      groupOtherBotRole: 'user',
       toggles: '',
       moduleIntegration: '',
       defaultVariables: '',
-      main: 'ST 메인 {{char}}',
-      globalNote: 'PHI 응답 직전',
       imported: [
         { kind: 'main', name: 'Main Prompt', into: 'main' },
         { kind: 'jailbreak', name: 'Post-History Instructions', into: 'globalNote' },
@@ -308,69 +315,115 @@ const history: HistoryMessage[] = [
   { role: 'user', content: '안녕.' },
 ];
 
-const preset = { main: `MAIN\n\n${SPEECH_PROTOCOL}`, postHistory: 'POST' };
-const reader = { main: '독자의 메인 추가', globalNote: '독자의 글로벌 노트' };
+/** A reader preset as it is stored: RisuAI's three texts, no template, its default order. */
+const stored = {
+  main: '독자의 메인',
+  globalNote: '독자의 글로벌 노트',
+  jailbreak: '',
+  formatingOrder: null,
+  promptTemplate: null,
+  groupTemplate: '',
+  groupOtherBotRole: 'user',
+};
+const reader: PromptPreset = readerPromptPreset(stored);
 
 const assemble = (characters: PromptCharacter[], extra: Partial<AssemblePromptInput> = {}) =>
   assemblePrompt({
     plot: { name: '서리 골짜기', description: '외딴 여관.', lorebook: [] },
     characters,
     history,
-    preset,
+    preset: reader,
     userName: '민준',
     report: true,
     ...extra,
   });
 
-const postHistoryOf = (prompt: ReturnType<typeof assemble>): string | undefined =>
-  prompt.report!.blocks.find((block) => block.kind === 'post_history')?.text;
+const blockOf = (prompt: ReturnType<typeof assemble>, kind: string): string | undefined =>
+  prompt.report!.blocks.find((block) => block.kind === kind)?.text;
+const sentOf = (prompt: ReturnType<typeof assemble>): string =>
+  [prompt.system, ...prompt.messages.map((message) => promptText(message.content))].join('\n');
+
+describe('readerPromptPreset', () => {
+  it('reads a row written before presets were RisuAI’s whole as RisuAI’s preset without a template', () => {
+    expect(reader).toEqual({
+      mainPrompt: '독자의 메인',
+      jailbreak: '',
+      globalNote: '독자의 글로벌 노트',
+      formatingOrder: RISU_DEFAULT_FORMATING_ORDER,
+      promptTemplate: null,
+      groupTemplate: '',
+      groupOtherBotRole: 'user',
+    });
+    expect(readerPromptPreset({ ...stored, formatingOrder: ['main', 'chats', 'bogus'], groupOtherBotRole: 'nobody' })).toMatchObject({
+      formatingOrder: ['main', 'chats'],
+      groupOtherBotRole: 'user',
+    });
+  });
+});
 
 describe('assemblePrompt — a reader preset', () => {
-  it('adds the main after the preset’s main and the note after its post-history block', () => {
-    const prompt = assemble([member()], { readerAdditions: reader });
-    const main = prompt.report!.blocks.find((block) => block.kind === 'main')!.text;
-    expect(main).toBe(`${preset.main}\n\n독자의 메인 추가`);
-    // The format hint still follows the main, and the work after both.
-    expect(prompt.report!.blocks.slice(0, 3).map((block) => block.kind)).toEqual(['main', 'format', 'narration_note']);
-    expect(prompt.report!.blocks[1]!.text).toBe(REPLY_FORMAT_HINT);
-    expect(postHistoryOf(prompt)).toBe('POST\n\n독자의 글로벌 노트');
+  it('replaces the built-in default whole, as picking a preset does in PocketRisu', () => {
+    const prompt = assemble([member()]);
+    expect(prompt.system.startsWith('독자의 메인\n\n서리 골짜기의 마녀.')).toBe(true);
+    expect(sentOf(prompt)).not.toContain('<SYSTEM_RULE>');
+    // RisuAI's default order: the global note after the newest turn.
+    const texts = prompt.messages.map((message) => promptText(message.content));
+    expect(texts.indexOf('독자의 글로벌 노트')).toBeGreaterThan(texts.indexOf('안녕.'));
+    // The built-in default is OAI2.
+    expect(assemble([member()], { preset: DEFAULT_PRESET }).system.startsWith('<SYSTEM_RULE>')).toBe(true);
   });
 
-  it('changes nothing when blank or absent', () => {
-    const without = assemble([member()]);
-    expect(assemble([member()], { readerAdditions: { main: '  ', globalNote: '' } })).toEqual(without);
+  it('gives way to a card’s own system prompt and post-history instructions, which bring it back only through {{original}}', () => {
+    const own = assemble([member({ systemPrompt: '카드의 지시', postHistoryInstructions: '카드의 끝 지시' })]);
+    expect(blockOf(own, 'main')).toBe('카드의 지시');
+    expect(blockOf(own, 'global_note')).toBe('카드의 끝 지시');
+    expect(sentOf(own)).not.toContain('독자의');
+
+    const keeps = assemble([member({ systemPrompt: '카드의 지시 [{{original}}]', postHistoryInstructions: '카드의 끝 지시 [{{original}}]' })]);
+    expect(blockOf(keeps, 'main')).toBe('카드의 지시 [독자의 메인]');
+    expect(blockOf(keeps, 'global_note')).toBe('카드의 끝 지시 [독자의 글로벌 노트]');
   });
 
-  it('gives way to a card’s own system prompt and post-history instructions, and comes back only through {{original}}', () => {
-    const own = assemble([member({ systemPrompt: '카드의 지시', postHistoryInstructions: '카드의 끝 지시' })], {
-      readerAdditions: reader,
+  it('under a template reads no card system prompt, as RisuAI reads none, and still the card’s global-note replacement', () => {
+    const templated: PromptPreset = {
+      ...reader,
+      promptTemplate: [
+        { type: 'plain', type2: 'main', text: '템플릿 메인', role: 'system' },
+        { type: 'description' },
+        { type: 'chat', rangeStart: 0, rangeEnd: 'end' },
+        { type: 'plain', type2: 'globalNote', text: '템플릿 노트', role: 'system' },
+      ],
+    };
+    const prompt = assemble([member({ systemPrompt: '카드의 지시 [{{original}}]', postHistoryInstructions: '카드의 끝 [{{original}}]' })], {
+      preset: templated,
     });
-    expect(own.system).toContain('카드의 지시');
-    expect(own.system).not.toContain('독자의 메인 추가');
-    expect(postHistoryOf(own)).toContain('카드의 끝 지시');
-    expect(postHistoryOf(own)).not.toContain('독자의 글로벌 노트');
-
-    const keeps = assemble(
-      [member({ systemPrompt: '카드의 지시 [{{original}}]', postHistoryInstructions: '카드의 끝 지시 [{{original}}]' })],
-      { readerAdditions: reader },
-    );
-    expect(keeps.system).toContain(`카드의 지시 [${preset.main}\n\n독자의 메인 추가]`);
-    expect(postHistoryOf(keeps)).toBe('카드의 끝 지시 [POST\n\n독자의 글로벌 노트]');
+    expect(blockOf(prompt, 'main')).toBe('템플릿 메인');
+    expect(sentOf(prompt)).not.toContain('카드의 지시');
+    expect(blockOf(prompt, 'global_note')).toBe('카드의 끝 [템플릿 노트]');
+    // The stale three texts of a template preset are never sent.
+    expect(sentOf(prompt)).not.toContain('독자의');
+    expect(prompt.risu?.template).toBe(true);
   });
 
-  it('is not sent for a RisuAI utility bot, as RisuAI sends it no global note', () => {
+  it('is not sent for a RisuAI utility bot, as RisuAI sends it RisuAI’s utility template', () => {
     const utility = member({ postHistoryInstructions: '도구 [{{original}}]', extensions: { risuai: { utilityBot: true } } });
-    const prompt = assemble([utility], { readerAdditions: reader });
-    const sent = [prompt.system, ...prompt.messages.map((message) => promptText(message.content))].join('\n');
-    expect(sent).not.toContain('독자의');
-    expect(postHistoryOf(prompt)).toBe('도구 []');
+    const prompt = assemble([utility]);
+    expect(sentOf(prompt)).not.toContain('독자의');
+    expect(blockOf(prompt, 'global_note')).toBe('도구 []');
+    expect(prompt.system).not.toContain('Speech rules:');
   });
 
-  it('follows the group protocol on a member’s turn', () => {
-    const prompt = assemble([member(), member({}, '벨')], { readerAdditions: reader, speaker: 1 });
-    const main = prompt.report!.blocks.find((block) => block.kind === 'main')!.text;
-    expect(main).toBe(`${groupPreset(preset).main}\n\n독자의 메인 추가`);
-    expect(main).toContain(GROUP_SPEECH_PROTOCOL);
+  it('teaches a group turn no protocol and sends the others in its group template', () => {
+    const grouped = { ...stored, groupTemplate: '({{char}}) {{slot}}' };
+    const prompt = assemble([{ ...member(), id: 'a' }, { ...member({}, '벨'), id: 'b' }], {
+      preset: readerPromptPreset(grouped),
+      speaker: 1,
+      history: [...history, { role: 'assistant', content: '안녕, 벨.', speakerId: 'a' }],
+    });
+    expect(prompt.system).not.toContain('Speech rules:');
+    expect(prompt.messages).toContainEqual({ role: 'user', content: '(아리아) 안녕, 벨.' });
+    // A scene still is taught it, under the members' names.
+    expect(assemble([member(), member({}, '벨')]).system).toContain(speechProtocol(['아리아', '벨']));
   });
 
   it('cannot pull the creator’s text into the prompt through a macro', () => {
@@ -395,14 +448,14 @@ describe('assemblePrompt — a reader preset', () => {
     });
     const probe =
       '{{char}}/{{user}} {{original}} {{charPrompt}} {{charJailbreak}} {{description}} {{mainprompt}} {{globalnote}} {{lorebook}} {{outlet::secret}}';
-    const prompt = assemble([creator], { readerAdditions: { main: probe, globalNote: probe } });
-    const sent = [prompt.system, ...prompt.messages.map((message) => promptText(message.content))].join('\n');
+    const prompt = assemble([creator], { preset: readerPromptPreset({ ...stored, main: probe, globalNote: probe }) });
+    const sent = sentOf(prompt);
 
     // Read as the reader wrote it: the two names, and every other macro a word.
     const literal =
       '서리 골짜기/민준 {{original}} {{charPrompt}} {{charJailbreak}} {{description}} {{mainprompt}} {{globalnote}} {{lorebook}} {{outlet::secret}}';
-    expect(prompt.system).toContain(`CREATOR-SYS [${preset.main}\n\n${literal}]`);
-    expect(postHistoryOf(prompt)).toBe(`CREATOR-PH [POST\n\n${literal}]`);
+    expect(blockOf(prompt, 'main')).toBe(`CREATOR-SYS [${literal}]`);
+    expect(blockOf(prompt, 'global_note')).toBe(`CREATOR-PH [${literal}]`);
     // The creator's text stands where the creator put it, once, and the outlet nobody else names is not sent.
     expect(sent.split('CREATOR-SYS')).toHaveLength(2);
     expect(sent.split('CREATOR-PH')).toHaveLength(2);
@@ -414,13 +467,18 @@ describe('assemblePrompt — a reader preset', () => {
     const text =
       '{{#when::toggle::rain}}비가 온다{{:else}}맑다{{/when}} {{getglobalvar::toggle_mood}} {{setglobalvar::x::1}} {{getvar::hp}}';
     const prompt = assemble([member()], {
-      readerAdditions: { main: text, globalNote: '' },
+      preset: readerPromptPreset({ ...stored, main: text }),
       globalVariables: { toggle_rain: '1', toggle_mood: '어둡게' },
       variables: { hp: '10' },
     });
-    const main = prompt.report!.blocks.find((block) => block.kind === 'main')!.text;
     // Chat variables stay out of the reader's text; a write is a word.
-    expect(main).toBe(`${preset.main}\n\n비가 온다 어둡게 {{setglobalvar::x::1}} {{getvar::hp}}`);
+    expect(blockOf(prompt, 'main')).toBe('비가 온다 어둡게 {{setglobalvar::x::1}} {{getvar::hp}}');
     expect(prompt.globalVariableWrites).toBeUndefined();
+  });
+
+  it('reads {{prefill_supported}} as RisuAI does on a model that takes no prefill', () => {
+    const prompt = assemble([member()], { preset: DEFAULT_PRESET, model: { id: 'gpt', prefill: false } });
+    expect(sentOf(prompt)).not.toContain('Roleplay response:');
+    expect(prompt.messages.at(-1)!.role).toBe('system');
   });
 });

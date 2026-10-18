@@ -225,6 +225,13 @@
       "when": 1792273969191,
       "tag": "0031_drop_relationship_stats",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1792304519041,
+      "tag": "0032_risu_prompt_presets",
+      "breakpoints": true
     }
   ]
 }

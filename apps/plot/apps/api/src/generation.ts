@@ -28,12 +28,11 @@ import {
   type LoreTrigger,
   type MacroClock,
   type NarratorConfig,
-  type Preset,
+  type PromptPreset,
   type PromptBranch,
   type PromptCharacter,
   type PromptPlot,
   type PromptReport,
-  type ReaderAdditions,
   type VariableDelta,
   type Variables,
 } from '@shizue/core';
@@ -71,7 +70,6 @@ import type { AppDeps, AppEnv, OpenGeneration, Tx } from './deps.js';
 import { invalidateMemoryForEdit, noteRequestOverhead, scheduleMemoryUpdate } from './memory.js';
 import { countGeneration, type GenerationResult } from './metrics.js';
 import { runPromptScriptJob } from './regexWorker.js';
-import { roleplayJailbreakTokens, withRoleplayJailbreak } from './roleplayJailbreak.js';
 import { withPromptScripts } from './sentHistory.js';
 import { regexStoredText } from './storedRegex.js';
 import { replyMemberOf, scheduleEmotionDetection } from './emotion.js';
@@ -251,10 +249,8 @@ export interface GenerationPlan {
    * Absent: no search, lore by keyword only.
    */
   vectors?: VectorPlan;
-  /** The chat's prompt preset. */
-  preset: Preset;
-  /** The reader's own preset on top of it (`chats.reader_preset_id`), if the chat picked one. */
-  readerAdditions?: ReaderAdditions | undefined;
+  /** The chat's prompt preset: its reader preset (`chats.reader_preset_id`) where it picked one, else the built-in default. */
+  preset: PromptPreset;
   /** Context budget this chat runs with (see memorySettings). */
   contextBudget: number;
   /**
@@ -542,18 +538,9 @@ async function buildRequestMessages(
   account?: ChatGPTAccount,
   report = false,
 ): Promise<BuiltRequest> {
-  // Always-on service instructions live outside the card's editable request.
-  // Reserve their space before assembly and Lua's refit, then add them once
-  // after both request editors, even for a utility bot or a replaced system.
-  const prompt = await buildEditableRequest(plan, deps, reader, account, report);
-  const request = withRoleplayJailbreak(
-    prompt,
-    plan.contextBudget,
-    plan.target.kind === 'continue' || Boolean(tavernBiasOf(plan).trim()),
-    plan.userName,
-  );
-  // How much history fits beside the rest is what memory summarizes against;
-  // include the always-on instructions. An inspector's look changes nothing.
+  const request = await buildEditableRequest(plan, deps, reader, account, report);
+  // How much history fits beside the rest is what memory summarizes against.
+  // An inspector's look changes nothing.
   if (!report && request.fixedTokens !== undefined) noteRequestOverhead(plan.chatId, request.fixedTokens);
   return request;
 }
@@ -592,7 +579,7 @@ async function buildEditableRequest(
         // RisuAI fits the request to the context again once its listeners left
         // it, before the request triggers see it (`refitRequest`) — after the
         // state is kept, as RisuAI's outlives a request it then refuses.
-        request = result.turns && refitRequest(result.turns, plan.contextBudget - roleplayJailbreakTokens(plan.userName));
+        request = result.turns && refitRequest(result.turns, plan.contextBudget);
       }
       if (triggers) {
         const input = { ...triggers, variables: applyVariableDelta(triggers.variables, listened.writes) };
@@ -959,7 +946,6 @@ async function assembleRequest(
     ...(plan.directions ? { directions: plan.directions } : {}),
     ...(plan.narrator ? { narrator: plan.narrator } : {}),
     preset: plan.preset,
-    ...(plan.readerAdditions ? { readerAdditions: plan.readerAdditions } : {}),
     variables: plan.variables,
     globalVariables: plan.globalVariables,
     clock: plan.clock,
@@ -982,9 +968,9 @@ async function assembleRequest(
     // its text rides along uncounted.
     trailingTurns: partial ? 1 : 0,
     ...(plan.speaker !== undefined ? { speaker: plan.speaker } : {}),
-    // The trailing and always-on instructions bypass the assembler too, so
-    // reserve them here without shifting the history's depth-lore slots.
-    contextBudget: plan.contextBudget - countTokens(partial) - countTokens(trailingSystem) - countTokens(languageLine) - roleplayJailbreakTokens(plan.userName),
+    // The trailing instructions bypass the assembler too, so reserve them here
+    // without shifting the history's depth-lore slots.
+    contextBudget: plan.contextBudget - countTokens(partial) - countTokens(trailingSystem) - countTokens(languageLine),
     report,
     ...(marksLore ? { markTavernLore: true } : {}),
   });

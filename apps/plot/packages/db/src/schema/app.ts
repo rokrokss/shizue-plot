@@ -369,10 +369,10 @@ export const personas = pgTable('personas', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
-// A reader's own preset: what they add on top of the prompt preset a chat runs
-// with — a main-instruction addition and a global note (@shizue/core
-// `ReaderAdditions`). Account-level, picked per chat (`chats.reader_preset_id`).
-// Count and lengths capped by the API.
+// A reader's own prompt preset, which replaces the built-in one on a chat that
+// picks it: RisuAI's `botPreset`, the fields that make the prompt (@shizue/core
+// `PromptPreset`, `readerPromptPreset`). Account-level, picked per chat
+// (`chats.reader_preset_id`). Count and lengths capped by the API.
 export const readerPresets = pgTable(
   'reader_presets',
   {
@@ -381,8 +381,17 @@ export const readerPresets = pgTable(
       .notNull()
       .references(() => user.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
+    // RisuAI's `mainPrompt`.
     main: text('main').notNull().default(''),
     globalNote: text('global_note').notNull().default(''),
+    jailbreak: text('jailbreak').notNull().default(''),
+    // RisuAI's `formatingOrder`; null for its default.
+    formatingOrder: jsonb('formating_order').$type<string[]>(),
+    // RisuAI's prompt template; null for none, where the three texts and the order are the prompt.
+    promptTemplate: jsonb('prompt_template').$type<unknown[]>(),
+    // RisuAI's group chat settings: how another member's message is sent.
+    groupTemplate: text('group_template').notNull().default(''),
+    groupOtherBotRole: text('group_other_bot_role').notNull().default('user'),
     // RisuAI's preset toggles (`customPromptTemplateToggle`): drawn first among a
     // chat's toggles while the preset is the chat's, in RisuAI's toggle syntax.
     toggles: text('toggles').notNull().default(''),
@@ -459,10 +468,12 @@ export const chats = pgTable(
     // into the prompt — SillyTavern's chat vectorization (`ChatRetrievalSettings`).
     // Null is off, as in ST.
     retrieval: jsonb('retrieval').$type<ChatRetrievalSettings>(),
-    // Prompt preset id (see @shizue/core presets); unknown values fall back to the default.
-    preset: text('preset').notNull().default('standard'),
-    // The reader's own preset on top of it; null adds nothing. Always one of the
-    // chat owner's, which the API checks on the way in and again when it reads it.
+    // Built-in prompt preset id (see @shizue/core presets); unknown values — the
+    // five style presets that were — fall back to the default.
+    preset: text('preset').notNull().default('default'),
+    // The reader's own preset, which replaces the built-in one; null keeps it.
+    // Always one of the chat owner's, which the API checks on the way in and
+    // again when it reads it.
     readerPresetId: uuid('reader_preset_id').references(() => readerPresets.id, { onDelete: 'set null' }),
     // Leaf of the currently selected branch. Intentionally unconstrained to avoid a
     // circular FK with messages.chat_id.

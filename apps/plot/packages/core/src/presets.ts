@@ -1,180 +1,381 @@
-export interface Preset {
-  main: string;
-  postHistory: string;
+/**
+ * Prompt presets in RisuAI's shape (ARCHITECTURE §6 프리셋): the prompt fields of
+ * its `botPreset` — the main prompt, jailbreak and global note, the order
+ * `sendChat` sends its blocks in without a prompt template (`formatingOrder`),
+ * and the prompt template that replaces that order when there is one — with
+ * the two settings of a group chat's messages. The assembler builds every
+ * request from one (`assemblePrompt`); a chat runs the built-in default unless
+ * its reader picked a preset of their own, which replaces it, as picking a
+ * preset does in PocketRisu.
+ */
+import { OAI2_MAIN, OAI2_PREFILL, OAI2_RESPONSE, OAI_JAILBREAK } from './oai2.js';
+
+/** The role a template item is sent as: RisuAI's `PromptRole`. */
+export type PromptItemRole = 'user' | 'bot' | 'system';
+
+/** RisuAI's `PromptItemPlain`: text of the preset's own. */
+export interface PromptItemPlain {
+  type: 'plain' | 'jailbreak' | 'cot';
+  /** `main` and `globalNote` are what a card's system prompt and global-note replacement stand in for. */
+  type2: 'normal' | 'globalNote' | 'main';
+  text: string;
+  role: PromptItemRole;
+  name?: string;
 }
 
-// {{char}} is the plot here, not one character: a chat holds the whole roster,
-// so the writer these presets frame is the work's, not a member's. The narrator
-// is not among the roles. A reply's unprefixed lines are the reply's own 지문,
-// written with the lines around them.
+/** RisuAI's `PromptItemTyped`: a block of the chat's own, wrapped in `innerFormat`'s `{{slot}}`. */
+export interface PromptItemTyped {
+  type: 'persona' | 'description' | 'lorebook' | 'postEverything' | 'memory';
+  innerFormat?: string;
+  role2?: PromptItemRole;
+  name?: string;
+}
+
+/** RisuAI's `PromptItemAuthorNote`. */
+export interface PromptItemAuthorNote {
+  type: 'authornote';
+  innerFormat?: string;
+  /** Sent in the note's place when the chat has none. */
+  defaultText?: string;
+  role2?: PromptItemRole;
+  name?: string;
+}
+
+/** RisuAI's `PromptItemChat`: a stretch of the chat, `[rangeStart, rangeEnd)`, negative from the end. */
+export interface PromptItemChat {
+  type: 'chat';
+  rangeStart: number;
+  rangeEnd: number | 'end';
+  chatAsOriginalOnSystem?: boolean;
+  name?: string;
+}
+
+/** RisuAI's `PromptItemChatML`: messages written out in ChatML. Not sent yet. */
+export interface PromptItemChatML {
+  type: 'chatML';
+  text: string;
+  name?: string;
+}
+
+/** RisuAI's `PromptItemCache`: a Claude cache point. Our provider caches by itself, so it sends nothing. */
+export interface PromptItemCache {
+  type: 'cache';
+  name?: string;
+  depth: number;
+  role: 'user' | 'assistant' | 'system' | 'all';
+}
+
+/** One item of a RisuAI prompt template (`PromptItem`). */
+export type PromptTemplateItem =
+  | PromptItemPlain
+  | PromptItemTyped
+  | PromptItemAuthorNote
+  | PromptItemChat
+  | PromptItemChatML
+  | PromptItemCache;
+
+/** RisuAI's `FormatingOrderItem`. */
+export type FormatOrderItem =
+  | 'main'
+  | 'jailbreak'
+  | 'chats'
+  | 'lorebook'
+  | 'globalNote'
+  | 'authorNote'
+  | 'lastChat'
+  | 'description'
+  | 'postEverything'
+  | 'personaPrompt';
+
+const FORMAT_ORDER_ITEMS: readonly FormatOrderItem[] = [
+  'main',
+  'jailbreak',
+  'chats',
+  'lorebook',
+  'globalNote',
+  'authorNote',
+  'lastChat',
+  'description',
+  'postEverything',
+  'personaPrompt',
+];
+
+/** RisuAI's default `formatingOrder` (`database.svelte.ts`); `sendChat` appends `postEverything`. */
+export const RISU_DEFAULT_FORMATING_ORDER: readonly FormatOrderItem[] = [
+  'main',
+  'description',
+  'personaPrompt',
+  'chats',
+  'lastChat',
+  'jailbreak',
+  'lorebook',
+  'globalNote',
+  'authorNote',
+];
+
+/** How a group chat sends another member's message (RisuAI's `groupOtherBotRole`, default `user`). */
+export type GroupOtherBotRole = 'user' | 'assistant' | 'system';
+
+/** RisuAI's default `groupTemplate`, which a preset's empty one falls back to. */
+export const DEFAULT_GROUP_TEMPLATE = "<{{char}}'s Message>\n{{slot}}\n</{{char}}'s Message>";
+
+/** A prompt preset: RisuAI's `botPreset`, the fields that make the prompt. */
+export interface PromptPreset {
+  mainPrompt: string;
+  jailbreak: string;
+  globalNote: string;
+  formatingOrder: readonly FormatOrderItem[];
+  /** RisuAI's `promptTemplate`: when there is one — even empty — the three texts and the order are not read. */
+  promptTemplate: readonly PromptTemplateItem[] | null;
+  /** RisuAI's `groupTemplate`; '' for its default (`DEFAULT_GROUP_TEMPLATE`). */
+  groupTemplate: string;
+  groupOtherBotRole: GroupOtherBotRole;
+}
 
 /**
- * The script protocol every preset teaches, written once. `speech.ts` parses
- * exactly this shape, so five copies of it would be five ways for the rendered
- * chat to drift out of step with what the model was told to write.
- *
- * The unprefixed lines are the reply's 지문, not a narrator's: a narrator that
- * every reply could hand a line to is a narrator the model decides to bring in.
+ * The built-in preset every chat runs unless its reader picked one of their
+ * own: PocketRisu's "Default Prompt" (OAI2), the template its "new preset"
+ * clones, with the OAI preset's jailbreak after everything — the text the
+ * owner had sent on every reply since 2026-10-18 (`oai2.ts`). A card's system
+ * prompt is not read under it, as RisuAI reads none under a template.
  */
-export const SPEECH_PROTOCOL = `Speech rules:
-- Write a character's words and actions on a line that starts with \`Name: \`. Write the name exactly as it appears in the character list.
-- Within that line, write actions, expressions and gestures as *descriptions wrapped in asterisks*; the rest is what that character says aloud.
-- Write the scene, setting and situation on lines with no prefix. Those lines are this reply's own narration, written alongside the characters' words, and dialogue goes only on \`Name: \` lines.
-- Several characters may take turns in one reply. Bring in only the characters the scene needs, and do not invent characters who do not exist.`;
-
-/** The same protocol as a one-line reminder, for the post-history block. */
-export const SPEECH_PROTOCOL_REMINDER =
-  "Write a character's words and actions on `Name: ` lines, the actions within those lines in *asterisks*, and the scene as this reply's own narration on lines with no prefix.";
+export const DEFAULT_PRESET: PromptPreset = {
+  mainPrompt: '',
+  jailbreak: '',
+  globalNote: '',
+  formatingOrder: RISU_DEFAULT_FORMATING_ORDER,
+  promptTemplate: [
+    { type: 'plain', type2: 'main', text: OAI2_MAIN, role: 'system' },
+    { type: 'description', innerFormat: '[Roleplay Setting]\n{{slot}}\n' },
+    { type: 'persona', innerFormat: '[{{user}} Character Profile]\n{{slot}}\n' },
+    { type: 'plain', type2: 'normal', text: '[Supplementary Information]\n', role: 'system' },
+    { type: 'lorebook' },
+    { type: 'plain', type2: 'globalNote', text: '', role: 'system' },
+    { type: 'authornote' },
+    { type: 'memory', innerFormat: '[Roleplay Summary]\n{{slot}}\n' },
+    { type: 'plain', type2: 'normal', text: OAI2_RESPONSE, role: 'system' },
+    { type: 'chat', rangeStart: 0, rangeEnd: -2, chatAsOriginalOnSystem: true },
+    { type: 'chat', rangeStart: -2, rangeEnd: 'end' },
+    { type: 'postEverything' },
+    { type: 'jailbreak', type2: 'normal', text: OAI_JAILBREAK, role: 'system' },
+    { type: 'plain', type2: 'normal', text: OAI2_PREFILL, role: 'bot' },
+  ],
+  groupTemplate: '',
+  groupOtherBotRole: 'user',
+};
 
 /**
- * What a group turn — one reply per speaker, in a work of two or more members —
- * teaches in place of `SPEECH_PROTOCOL` (`groupPreset`). The reply is the
- * speaker's whole and is stored under them, so it carries no `이름: ` prefix, and
- * the speaker's own action and what they see around them go in it as `*…*`. The
- * other members' replies reach the model under theirs; the narrator takes no
- * turn of its own — it speaks when the reader asks for it, and only then.
+ * RisuAI's utility-bot template (`sendChat`, `currentChar.utilityBot`): the
+ * card's description, its lore, the whole chat and its global-note replacement,
+ * with nothing of the preset's around them.
  */
-export const GROUP_SPEECH_PROTOCOL = `Speech rules:
-- In this conversation the characters answer one at a time. Each reply belongs to one speaker, and the [Next speaker: Name] line at the very end decides this reply's speaker.
-- Write centered on the speaker's words and actions. Add no name prefix; write the speaker's actions, expressions and gestures, and the scene around the speaker, as *descriptions wrapped in asterisks* inside this reply. Text outside the asterisks is what that character says aloud.
-- Do not write the other characters' replies. Each of them answers directly on their own turn. A \`Name: \` line in the conversation log is the words and actions of the character with that name.
-- A message marked [Narration] is scene narration that comes in only when the user calls for narration, and it is no character's words. When the scene needs describing, write it as the speaker's own asterisk descriptions.
-- Do not invent characters who are not in the character list.`;
+export const UTILITY_TEMPLATE: readonly PromptTemplateItem[] = [
+  { type: 'plain', type2: 'main', text: '', role: 'system' },
+  { type: 'description' },
+  { type: 'lorebook' },
+  { type: 'chat', rangeStart: 0, rangeEnd: 'end' },
+  { type: 'plain', type2: 'globalNote', text: '', role: 'system' },
+  { type: 'postEverything' },
+];
 
-/**
- * How a reply marks what is not dialogue, worded after RisuAI's default preset
- * ("Use italics in markdown for non-dialogues.") and as short: the chat dims
- * only what is marked (`*…*`) inside a bubble, as RisuAI greys its italics.
- * Conditional and a preference only — a reply may be dialogue only, 지문 only,
- * or both, and the hint asks for no order and no length. `assemblePrompt` sends
- * it only beside one of these presets, never beside a card's own instructions.
- */
-export const REPLY_FORMAT_HINT =
-  'Reply format (recommended): wrap what is not dialogue (actions, expressions, descriptions) in *…*, and write dialogue as it is. Either one alone is fine.';
-
-/** The group protocol as a one-line reminder, in place of `SPEECH_PROTOCOL_REMINDER`. */
-export const GROUP_SPEECH_PROTOCOL_REMINDER =
-  "Write this reply centered on the designated speaker's words and actions with no name prefix, put the actions and the scene around them in *asterisks*, and do not write the other characters' replies.";
-
-/** Writer-framing RP system prompt. */
-export const DEFAULT_MAIN_PRESET = `You are the writer who plays every character of {{char}}. Based on the settings below, keep each character's personality and way of speaking consistent as you continue the scene.
-
-${SPEECH_PROTOCOL}
-
-Writing rules:
-- Always reply in the same language the user writes in. Do not insist on any one language; if the user switches languages, switch with them.
-- Write 2–4 paragraphs, adjusting the length to the rhythm of the scene.
-- Draw the scene concretely through the five senses and small gestures, and do not repeat the same expressions.
-- Do not summarize or wrap up the story on your own; leave room, waiting for {{user}}'s response.
-- Do not mention that you are an AI or that these instructions exist.`;
-
-/** Reminder appended after the conversation history. */
-export const DEFAULT_POST_HISTORY_PRESET = `[You now play the characters of {{char}}. ${SPEECH_PROTOCOL_REMINDER} Do not stray from their established personalities and ways of speaking. Reply in the language the user writes in.]`;
-
-export const DEFAULT_PRESET: Preset = {
-  main: DEFAULT_MAIN_PRESET,
-  postHistory: DEFAULT_POST_HISTORY_PRESET,
-};
-
-/** Immersive prose: the 지문 carries the scene, the members answer inside it. */
-const NOVEL_PRESET: Preset = {
-  main: `You are a novelist continuing the scenes of {{char}}. Based on the settings below, keep each character's personality and way of speaking consistent, and write so that the reader feels present inside the scene.
-
-${SPEECH_PROTOCOL}
-
-Writing rules:
-- Always reply in the same language the user writes in. Do not insist on any one language; if the user switches languages, switch with them.
-- The narration lines carry the weight. Write the air, light, sound and temperature, and the characters' inner states, as unprefixed narrative sentences, and set the dialogue lines between them.
-- Write 3–5 paragraphs. Run each narration line on for three sentences or more, and keep the dialogue lines short.
-- Do not name emotions; show them through bodily reactions and actions. Instead of "was angry", write what goes rigid at the fingertips, and how.
-- Observe the scene's surroundings anew each time. Do not repeat the same expressions or the same sentence structures.
-- Do not summarize or wrap up the story on your own; break the paragraph at a moment that leaves {{user}} room to respond.
-- Do not mention that you are an AI or that these instructions exist.`,
-  postHistory: `[You now play the characters of {{char}}. ${SPEECH_PROTOCOL_REMINDER} Carry inner states and surroundings in the narration lines, write 3–5 paragraphs, and reply in the language the user writes in.]`,
-};
-
-/** Messenger-paced exchanges: short, dialogue-only, almost no narration. */
-const CONCISE_PRESET: Preset = {
-  main: `You take on the characters of {{char}} and keep a real-time back-and-forth going. Instead of long narration, move the scene along with short, quick exchanges.
-
-${SPEECH_PROTOCOL}
-
-Writing rules:
-- Always reply in the same language the user writes in. Do not insist on any one language; if the user switches languages, switch with them.
-- Replies are 1–2 paragraphs and generally no longer than three sentences. Keep them short, like messages traded in a messenger.
-- Write mostly dialogue lines. Add a narration line only when the scene actually moves, and leave it out when it can go.
-- Add asterisk descriptions only when truly needed, one phrase at a time. Do not lay out surroundings or inner states; reveal personality through tone and reactions.
-- Handle one topic at a time, and pass the ball to {{user}} by asking back or answering briefly.
-- Short does not mean careless. Do not repeat the same answer; react from a different angle each time.
-- Do not mention that you are an AI or that these instructions exist.`,
-  postHistory: `[You now play the characters of {{char}}. ${SPEECH_PROTOCOL_REMINDER} Reply in 1–2 paragraphs, mostly short dialogue lines of three sentences or fewer, with as few narration lines as possible. Reply in the language the user writes in.]`,
-};
-
-/** Rhetorical, sensory prose — the mood carries more weight than the plot. */
-const LITERARY_PRESET: Preset = {
-  main: `You are a stylist who takes on the characters of {{char}}. Rather than rushing events along, hone the senses and lingering resonance of a single scene.
-
-${SPEECH_PROTOCOL}
-
-Writing rules:
-- Always reply in the same language the user writes in. Do not insist on any one language; if the user switches languages, switch with them.
-- Put at least two of the five senses into every reply. Write the less obvious senses, such as smell, texture and sound, first.
-- Use metaphor and contrast, but no more than twice in one reply. Stacked modifiers muddy the prose.
-- Vary sentence length on purpose. Set a short sentence after a long one to create rhythm.
-- Use dialogue sparingly. Write what goes unsaid, the moment of hesitation and where a gaze rests on the narration lines.
-- Write 2–4 paragraphs. Do not reuse clichéd metaphors or images already used, and do not close a scene on a sentimental closing sentence.
-- Do not mention that you are an AI or that these instructions exist.`,
-  postHistory: `[You now play the characters of {{char}}. ${SPEECH_PROTOCOL_REMINDER} Write 2–4 paragraphs with sensory description and restrained metaphor. Reply in the language the user writes in.]`,
-};
-
-/** Screenplay pacing: scene headings, dialogue lines, directions kept to a beat. */
-const SCREENPLAY_PRESET: Preset = {
-  main: `You are a screenwriter writing the script of {{char}}. Set the scene down as a camera would, in dialogue lines and brief directions only.
-
-${SPEECH_PROTOCOL}
-
-Writing rules:
-- Always reply in the same language the user writes in. Do not insist on any one language; if the user switches languages, switch with them.
-- When the scene changes, put a single "— Place / Time" line on an unprefixed narration line. Keep all other narration to a minimum.
-- Keep asterisk descriptions to brief movements, expressions and pauses. Write them like *half-closes the door* *a beat*, and add no explanation of inner states.
-- If the dialogue works without directions, add none. If the asterisks run longer than the dialogue, cut them.
-- Each reply runs 2–5 lines of dialogue and leaves the other side room to answer back.
-- Do not mention that you are an AI or that these instructions exist.`,
-  postHistory: `[You now play the characters of {{char}}. ${SPEECH_PROTOCOL_REMINDER} Write only 2–5 lines of dialogue and brief asterisk directions, and add a "— Place / Time" line only when the scene changes. Reply in the language the user writes in.]`,
-};
-
-/** Prompt presets, keyed by the id stored on the chat. */
-export const PRESETS = {
-  standard: DEFAULT_PRESET,
-  novel: NOVEL_PRESET,
-  concise: CONCISE_PRESET,
-  literary: LITERARY_PRESET,
-  screenplay: SCREENPLAY_PRESET,
-} as const satisfies Record<string, Preset>;
+/** The built-in presets, keyed by the id a chat stores. */
+export const PRESETS = { default: DEFAULT_PRESET } as const satisfies Record<string, PromptPreset>;
 
 export type PresetId = keyof typeof PRESETS;
 
 export const PRESET_IDS = Object.keys(PRESETS) as PresetId[];
 
 export function isPresetId(value: unknown): value is PresetId {
-  // Own keys only: `in` would accept 'toString', '__proto__' and friends, and a
-  // stored id that is not a real preset breaks the next generation.
+  // Own keys only: `in` would accept 'toString', '__proto__' and friends.
   return typeof value === 'string' && Object.hasOwn(PRESETS, value);
 }
 
-/** The preset for a stored id, falling back to the default for anything unknown. */
-export function getPreset(id: string | null | undefined): Preset {
+/** The built-in preset for a stored id, the default for anything else — the five style presets that were. */
+export function getPreset(id: string | null | undefined): PromptPreset {
   return isPresetId(id) ? PRESETS[id] : DEFAULT_PRESET;
 }
 
 /**
- * A preset as a group turn reads it: the speech protocol and its reminder swapped
- * for the group's. Every built-in preset carries both (a test holds them to it);
- * a preset that does not is left as it is.
+ * The items a preset is sent by, and whether they stand for RisuAI's path
+ * without a template (`legacy`): its `formatingOrder` in RisuAI's blocks, the
+ * three texts in their places, `chats` the chat but its newest turn and
+ * `lastChat` that turn — where a card's system prompt replaces the main prompt
+ * and the start triggers' turns go around the newest one. `postEverything`
+ * closes both, as `sendChat` appends it to either.
  */
-export function groupPreset(preset: Preset): Preset {
-  return {
-    main: preset.main.replace(SPEECH_PROTOCOL, () => GROUP_SPEECH_PROTOCOL),
-    postHistory: preset.postHistory.replace(SPEECH_PROTOCOL_REMINDER, () => GROUP_SPEECH_PROTOCOL_REMINDER),
-  };
+export function templateOf(preset: PromptPreset): { items: PromptTemplateItem[]; legacy: boolean } {
+  if (preset.promptTemplate) {
+    const items = [...preset.promptTemplate];
+    if (!items.some((item) => item.type === 'postEverything')) items.push({ type: 'postEverything' });
+    return { items, legacy: false };
+  }
+  const items: PromptTemplateItem[] = [];
+  for (const block of [...preset.formatingOrder, 'postEverything' as const]) {
+    switch (block) {
+      case 'main':
+        items.push({ type: 'plain', type2: 'main', text: preset.mainPrompt, role: 'system' });
+        break;
+      case 'jailbreak':
+        items.push({ type: 'jailbreak', type2: 'normal', text: preset.jailbreak, role: 'system' });
+        break;
+      case 'globalNote':
+        items.push({ type: 'plain', type2: 'globalNote', text: preset.globalNote, role: 'system' });
+        break;
+      case 'chats':
+        items.push({ type: 'chat', rangeStart: 0, rangeEnd: -1 });
+        break;
+      case 'lastChat':
+        items.push({ type: 'chat', rangeStart: -1, rangeEnd: 'end' });
+        break;
+      case 'description':
+        items.push({ type: 'description' });
+        break;
+      case 'personaPrompt':
+        items.push({ type: 'persona' });
+        break;
+      case 'lorebook':
+        items.push({ type: 'lorebook' });
+        break;
+      case 'authorNote':
+        items.push({ type: 'authornote' });
+        break;
+      case 'postEverything':
+        items.push({ type: 'postEverything' });
+        break;
+    }
+  }
+  return { items, legacy: true };
 }
+
+/* ------------------------------------------------------------ normalizing */
+
+type Json = Record<string, unknown>;
+const isObject = (value: unknown): value is Json => typeof value === 'object' && value !== null && !Array.isArray(value);
+const textOf = (value: unknown): string => (typeof value === 'string' ? value : '');
+const nameOf = (value: unknown): { name?: string } => (typeof value === 'string' && value ? { name: value } : {});
+
+/** RisuAI's `normalizePromptRole`: `assistant` and `char` are the bot, anything unknown the system. */
+export function promptItemRole(role: unknown): PromptItemRole {
+  if (role === 'user' || role === 'bot' || role === 'system') return role;
+  if (role === 'assistant' || role === 'char') return 'bot';
+  return 'system';
+}
+
+const optionalRole = (role: unknown): { role2?: PromptItemRole } =>
+  role === undefined || role === null || role === '' ? {} : { role2: promptItemRole(role) };
+
+const finiteOr = (value: unknown, fallback: number): number =>
+  typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : fallback;
+
+/** One stored or imported template item, in our shape, or null for a type RisuAI has not. */
+export function promptTemplateItem(value: unknown): PromptTemplateItem | null {
+  if (!isObject(value)) return null;
+  const type = value['type'];
+  switch (type) {
+    case 'plain':
+    case 'jailbreak':
+    case 'cot': {
+      const type2 = value['type2'];
+      return {
+        type,
+        type2: type2 === 'main' || type2 === 'globalNote' ? type2 : 'normal',
+        text: textOf(value['text']),
+        role: promptItemRole(value['role']),
+        ...nameOf(value['name']),
+      };
+    }
+    case 'persona':
+    case 'description':
+    case 'lorebook':
+    case 'postEverything':
+    case 'memory': {
+      const innerFormat = textOf(value['innerFormat']);
+      return { type, ...(innerFormat ? { innerFormat } : {}), ...optionalRole(value['role2']), ...nameOf(value['name']) };
+    }
+    case 'authornote': {
+      const innerFormat = textOf(value['innerFormat']);
+      const defaultText = textOf(value['defaultText']);
+      return {
+        type,
+        ...(innerFormat ? { innerFormat } : {}),
+        ...(defaultText ? { defaultText } : {}),
+        ...optionalRole(value['role2']),
+        ...nameOf(value['name']),
+      };
+    }
+    case 'chat':
+      return {
+        type,
+        rangeStart: finiteOr(value['rangeStart'], 0),
+        rangeEnd: value['rangeEnd'] === 'end' ? 'end' : finiteOr(value['rangeEnd'], 0),
+        ...(value['chatAsOriginalOnSystem'] === true ? { chatAsOriginalOnSystem: true } : {}),
+        ...nameOf(value['name']),
+      };
+    case 'chatML':
+      return { type, text: textOf(value['text']), ...nameOf(value['name']) };
+    case 'cache': {
+      const role = value['role'];
+      return {
+        type,
+        depth: finiteOr(value['depth'], 0),
+        role: role === 'user' || role === 'assistant' || role === 'system' ? role : 'all',
+        ...nameOf(value['name']),
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+/** A stored or imported template: its items in our shape (unknown ones dropped), or null for none. */
+export function normalizePromptTemplate(value: unknown): PromptTemplateItem[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.flatMap((item) => {
+    const normalized = promptTemplateItem(item);
+    return normalized ? [normalized] : [];
+  });
+}
+
+/** A stored or imported `formatingOrder`: its known blocks once each, or RisuAI's default where there is none. */
+export function normalizeFormatingOrder(value: unknown): FormatOrderItem[] {
+  if (!Array.isArray(value)) return [...RISU_DEFAULT_FORMATING_ORDER];
+  const seen = new Set<FormatOrderItem>();
+  for (const item of value) {
+    if (typeof item === 'string' && (FORMAT_ORDER_ITEMS as readonly string[]).includes(item)) seen.add(item as FormatOrderItem);
+  }
+  // `postEverything` is `sendChat`'s to append.
+  seen.delete('postEverything');
+  return [...seen];
+}
+
+/** A stored `groupOtherBotRole`, RisuAI's `user` for anything else. */
+export function groupOtherBotRoleOf(value: unknown): GroupOtherBotRole {
+  return value === 'assistant' || value === 'system' ? value : 'user';
+}
+
+/* ------------------------------------------------------------ speech protocol */
+
+/**
+ * The format rule a reply of one asked voice — a work of one member, or a
+ * scene — is taught, so the chat can draw a character's lines as bubbles and
+ * the rest as narration, Zeta's way (§6 발화 프로토콜, kept on 2026-10-18 when
+ * the prompt went RisuAI's way). `speech.ts` reads exactly this shape. It is
+ * no part of any preset: the assembler adds it at the end of the leading
+ * system turns whatever the preset says, and leaves it out of a group turn,
+ * whose reply is one member's whole, and of a utility bot.
+ */
+export function speechProtocol(names: readonly string[]): string {
+  const list = names.filter((name) => name.trim()).join(', ');
+  return `Speech rules:
+- Write a character's words and actions on a line that starts with \`Name: \`${list ? `, the name written exactly as one of: ${list}` : ''}.
+- Within that line, write actions, expressions and gestures as *descriptions wrapped in asterisks*; the rest is what that character says aloud.
+- Write the scene, setting and situation on lines with no prefix. Those lines are this reply's own narration, written alongside the characters' words, and dialogue goes only on \`Name: \` lines.
+- Several characters may take turns in one reply. Bring in only the characters the scene needs, and do not invent characters who do not exist.`;
+}
+
+/** The speech protocol as a one-line reminder, at the start of what follows the chat. */
+export const SPEECH_PROTOCOL_REMINDER =
+  "Write a character's words and actions on `Name: ` lines, the actions within those lines in *asterisks*, and the scene as this reply's own narration on lines with no prefix.";
+
+/** RisuAI's line that closes a group speaker's request (`sendChat`, `postEverything`). */
+export const groupSpeakerLine = (name: string): string => `[Write the next reply only as ${name}]`;
