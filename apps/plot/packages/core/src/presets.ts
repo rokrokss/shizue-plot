@@ -190,7 +190,7 @@ export function isPresetId(value: unknown): value is PresetId {
   return typeof value === 'string' && Object.hasOwn(PRESETS, value);
 }
 
-/** The built-in preset for a stored id, the default for anything else — the five style presets that were. */
+/** The built-in preset for a stored id, the default for anything else. */
 export function getPreset(id: string | null | undefined): PromptPreset {
   return isPresetId(id) ? PRESETS[id] : DEFAULT_PRESET;
 }

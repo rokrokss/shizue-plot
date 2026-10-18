@@ -110,24 +110,6 @@ about 2 GB to the process's memory and is unloaded after ten idle minutes;
 (135 MB, about 750 MB loaded), and `EMBEDDER=off` none — which a process started
 by hand on a fresh `SHIZUE_DATA_DIR` wants, or it downloads the 738 MB into it.
 
-### Moving from the Postgres setup
-
-A checkout from before 2026-10-18 kept its data in Docker's PostgreSQL, with its
-files in `UPLOAD_DIR` or the RustFS bucket. With the old database container
-running again (`docker start shizue-postgres`; the repository no longer has a
-`docker-compose.yml`), copy everything into an empty app folder once:
-
-```sh
-pnpm --filter @shizue/api import:postgres -- \
-  --from postgres://plot:plot@localhost:15433/plot --uploads ./data/uploads
-```
-
-It keeps the old `BETTER_AUTH_SECRET` as the folder's secret, so the ChatGPT
-connection still opens, and only reads the source. Files that were in an S3
-bucket are no longer read: move such an install with `901599a` or an earlier
-build, whose `import:postgres --s3` copies the bucket too, and whose
-`docker-compose.yml` still runs the old PostgreSQL and RustFS.
-
 ### The package
 
 `npm pack` in `apps/plot/apps/cli` builds the package first (`scripts/build.mjs`):
@@ -301,10 +283,11 @@ server with a real ChatGPT connection.
 
 ## Migrations
 
-`pnpm db:generate` creates migrations. Nothing applies them by hand: the app
-migrates its folder at every start. The character-chat schema starts from
-a single initial migration, including the pgvector extension; upgrades from the
-removed products are unsupported.
+The schema starts from one initial migration, `0000_init` in
+`apps/plot/packages/db/drizzle/`, which drizzle-kit generated from
+`src/schema` and which creates the pgvector extension first. When the schema
+changes, `pnpm db:generate` writes the next migration beside it. Nothing applies
+them by hand: the app migrates its folder at every start.
 
 ## Operations
 

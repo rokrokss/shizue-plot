@@ -55,8 +55,7 @@
  * rewrites the texts — re-read under the lock, so an edit made meanwhile is
  * kept and only the references this run resolved change. An asset of the plot
  * already named for an address is reused rather than fetched again, so a second
- * card importing the same font, or a re-run of `fix:localize-assets`, fetches
- * nothing twice.
+ * card importing the same font fetches nothing twice.
  */
 import {
   ASSET_ADDRESS_MACRO,
@@ -251,8 +250,6 @@ export interface LocalizeOutcome {
   overLimit: number;
   /** Files stored. */
   stored: number;
-  /** Addresses found, before anything was fetched — what a dry run reports. */
-  found: { address: string; kind: string }[];
   /** The asset ids each module's texts brought, for its record (`PlotModule.assets`). */
   moduleAssets: Map<string, string[]>;
 }
@@ -434,7 +431,7 @@ interface Keep {
 /** What a run found in the texts and brought in, before any of it has a place (`gather`). */
 interface Gathered {
   outcome: LocalizeOutcome;
-  /** Nothing to bring and nothing to rewrite, or a dry run: the run ends here. */
+  /** Nothing to bring and nothing to rewrite: the run ends here. */
   done: boolean;
   stored: Stored[];
   unitOfName: Map<string, string>;
@@ -449,8 +446,8 @@ interface Gathered {
 }
 
 /**
- * Steps 1 and 2 of a run: what `scope`'s texts in `state` name, and — unless a
- * dry run — every file and stylesheet fetched and its bytes kept (`keep`).
+ * Steps 1 and 2 of a run: what `scope`'s texts in `state` name, and every file
+ * and stylesheet fetched and its bytes kept (`keep`).
  * `cards` and `lore` are what the prompt reads (`promptSources`, `promptTexts`)
  * besides the modules' own lore, which `state` carries.
  */
@@ -461,9 +458,8 @@ async function gather(
   cards: readonly { id: string; card: NormalizedCard }[],
   lore: readonly { content: string }[],
   keep: Keep,
-  dryRun: boolean,
 ): Promise<Gathered> {
-  const outcome: LocalizeOutcome = { failed: 0, overLimit: 0, stored: 0, found: [], moduleAssets: new Map() };
+  const outcome: LocalizeOutcome = { failed: 0, overLimit: 0, stored: 0, moduleAssets: new Map() };
 
   // 1. What the texts name.
   const statics = new Map<string, { rank: number; unit: string }>();
@@ -481,7 +477,6 @@ async function gather(
     drawn.push(field.text);
     if (field.stylesheet && field.text.search(ASSET_ADDRESS_MACRO) >= 0) addressed = true;
     for (const ref of findExternal(field.text)) {
-      outcome.found.push({ address: ref.address, kind: ref.kind });
       if (ref.kind === 'import') {
         const url = ref.url;
         if (url) imports.set(url, imports.get(url) ?? field.unit);
@@ -510,7 +505,6 @@ async function gather(
   for (const { text, unit } of promptSources(cards, lore, state.customUi.modules ?? [], scope)) {
     for (const ref of findExternal(text)) {
       if (ref.kind !== 'import' || !ref.url || imports.has(ref.url) || promptImports.has(ref.url)) continue;
-      outcome.found.push({ address: ref.address, kind: ref.kind });
       promptImports.set(ref.url, { unit, media: ref.media });
     }
   }
@@ -527,7 +521,7 @@ async function gather(
     misses,
     miss,
   };
-  if (dryRun || (statics.size === 0 && imports.size === 0 && templates.size === 0 && promptImports.size === 0 && !addressed)) {
+  if (statics.size === 0 && imports.size === 0 && templates.size === 0 && promptImports.size === 0 && !addressed) {
     outcome.failed = [...misses.values()].filter((why) => why === 'failed').length;
     return { ...gathered, done: true };
   }
@@ -851,16 +845,11 @@ function counted(g: Gathered): LocalizeOutcome {
 
 /**
  * Localizes the external references in `scope`'s texts of a plot: fetches,
- * stores, rewrites, and says what it left. With `dryRun`, only finds them.
+ * stores, rewrites, and says what it left.
  */
-export async function localizePlot(
-  deps: LocalizeDeps,
-  plotId: string,
-  scope: LocalizeScope,
-  { dryRun = false, touch = true }: { dryRun?: boolean; touch?: boolean } = {},
-): Promise<LocalizeOutcome> {
+export async function localizePlot(deps: LocalizeDeps, plotId: string, scope: LocalizeScope): Promise<LocalizeOutcome> {
   const [plot] = await deps.db.select().from(plots).where(eq(plots.id, plotId)).limit(1);
-  if (!plot) return { failed: 0, overLimit: 0, stored: 0, found: [], moduleAssets: new Map() };
+  if (!plot) return { failed: 0, overLimit: 0, stored: 0, moduleAssets: new Map() };
   const state: State = { intros: plot.intros, customUi: plot.customUi ?? {} };
   const cards = await deps.db
     .select({ id: characters.id, card: characters.card })
@@ -880,7 +869,6 @@ export async function localizePlot(
       known: new Set(existing.flatMap((asset) => (asset.name ? [asset.name] : []))),
       save: (id, bytes) => saveAsset(deps.storage, id, bytes, { audio: true, font: true }),
     },
-    dryRun,
   );
   if (g.done) return g.outcome;
   const { outcome, stored } = g;
@@ -950,7 +938,7 @@ export async function localizePlot(
           .set({
             intros: after.intros,
             customUi: Object.keys(customUi).length > 0 ? customUi : null,
-            ...(touch ? { updatedAt: new Date() } : {}),
+            updatedAt: new Date(),
           })
           .where(eq(plots.id, plotId));
       }
@@ -995,7 +983,6 @@ export async function localizeReaderModule(
       known: new Set(assets.map((asset) => asset.name)),
       save: (id, bytes) => saveAsset(deps.storage, id, bytes, { audio: true, font: true, key: readerModuleAssetKey }),
     },
-    false,
   );
   if (g.done) return { module, assets: [...assets], outcome: g.outcome };
   const ranked = [...g.stored].sort((a, b) => a.rank - b.rank || a.order - b.order);

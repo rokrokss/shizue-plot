@@ -11,8 +11,7 @@
  *   more go first. Scheduled after every write that can change the lore, on the
  *   creator's model, and lazily by a Korean reader's request that meets an
  *   entry without one, on theirs (`vectors.ts` `scheduleLoreAliases`, which
- *   guards it to one pass a plot); the backfill (`fix:lore-aliases`) runs it for
- *   works made before.
+ *   guards it to one pass a plot).
  * - **A request reads them** (`loreAliasesFor`): only in the `instruct` mode for
  *   a Korean reader over such a book, as `ActivateLoreInput.aliases`. Until an
  *   entry's row lands it activates by its keys alone.
@@ -59,7 +58,7 @@ const backingOff = new Map<string, number>();
 export const loreAliasesEnabled = (env: NodeJS.ProcessEnv): boolean => env['LORE_ALIASES']?.trim() !== 'off';
 
 /** The key an entry's aliases are stored under: a hash of what they are made from (`aliasSourceText`). */
-export const aliasHash = (entry: AliasSource): string => createHash('sha256').update(aliasSourceText(entry)).digest('hex');
+const aliasHash = (entry: AliasSource): string => createHash('sha256').update(aliasSourceText(entry)).digest('hex');
 
 /** A row's aliases as stored: the list alone where no secondary key was asked about. */
 const stored = (aliases: LoreAliases): string[] | LoreAliases => (aliases.secondary ? aliases : aliases.keys);
@@ -68,13 +67,13 @@ const stored = (aliases: LoreAliases): string[] | LoreAliases => (aliases.second
  * The entries the pass aliases, in a work of `language`: its keyed entries when
  * it is not Korean and its book has (next to) no Korean keys, else none.
  */
-export function aliasableEntries(language: ContentLanguage, entries: readonly LoreEntry[]): LoreEntry[] {
+function aliasableEntries(language: ContentLanguage, entries: readonly LoreEntry[]): LoreEntry[] {
   if (language === LORE_ALIAS_LANGUAGE || !lacksKoreanKeys(entries)) return [];
   return entries.filter(isKeyedLoreEntry);
 }
 
 /** Every lore entry a work holds: its own book, its members' and its modules'. */
-export async function loadWorkLore(
+async function loadWorkLore(
   deps: Pick<AppDeps, 'db'>,
   plotId: string,
 ): Promise<{ language: ContentLanguage; entries: LoreEntry[] } | null> {

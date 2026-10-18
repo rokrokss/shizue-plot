@@ -1,1 +1,0 @@
-ALTER TABLE "chats" ADD COLUMN "allow_low_level_access" boolean DEFAULT false NOT NULL;

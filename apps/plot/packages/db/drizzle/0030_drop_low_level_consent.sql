@@ -1,1 +1,0 @@
-ALTER TABLE "chats" DROP COLUMN "allow_low_level_access";

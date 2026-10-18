@@ -1,1 +1,0 @@
-ALTER TABLE "chats" ADD COLUMN "sub_model" text;

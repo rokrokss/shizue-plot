@@ -144,8 +144,6 @@ import type { Embedder } from '../src/embedder.js';
 import { extractFacts } from '../src/facts.js';
 import { BACKFILL_BATCHES_PER_RUN, embedPendingSummaries } from '../src/memory.js';
 import { createJobHandlers } from '../src/jobHandlers.js';
-import { repairDisplayOrder } from '../src/maintenance/displayOrder.js';
-import { repairMemberScripts } from '../src/maintenance/memberScripts.js';
 import { FILE_IMPORT_PART_BYTES, MAX_WORLD_INFO_BYTES, runFileImport, sweepFileImports } from '../src/fileImports.js';
 import { localizePlot, type RemoteFetch } from '../src/localizeAssets.js';
 import { MAX_ASSET_NAME_LENGTH, MAX_CARD_IMPORT_BYTES } from '../src/routes/plots.js';
@@ -5866,191 +5864,6 @@ describe('custom UI in a work of several members', () => {
     expect(await exported(plot.characters[0].id)).toEqual(['\\[lumi\\]', '\\[all\\]']);
     expect(await exported(nox)).toEqual(['\\[nox\\]', '\\[all\\]']);
   });
-
-  it('lifts what companions imported before 355e738 left on their cards, once, and leaves works changed since', async () => {
-    const owner = await signUp('w4-repair@example.com');
-    const lumiCard = () =>
-      risu('lumi', { backgroundHTML: '<div class="sky">밤</div><style>.lumi { color: red; }</style>', defaultVariables: 'hp=100' });
-    const noxCard = () =>
-      risu('nox', { backgroundHTML: '<div class="cave">동굴</div><style>.nox { color: blue; }</style>', defaultVariables: 'hp=50\ngold=3' });
-    const storedOf = async (id: string) => {
-      const [row] = await db
-        .select({ customUi: plots.customUi, updatedAt: plots.updatedAt })
-        .from(plots)
-        .where(eq(plots.id, id));
-      return row!;
-    };
-    /** What the plot import before 355e738 left: lumi's lift, untagged, and nothing of a companion's. */
-    const OLD = { displayScripts: [script('lumi', 0)], css: '.lumi { color: red; }', defaultVariables: { hp: '100' } };
-    const asImportedBefore = (id: string, customUi: object) =>
-      db.update(plots).set({ customUi: customUi as never }).where(eq(plots.id, id));
-
-    // Lumi made the work and nox joined it; the roster has moved since, nox in front.
-    const old = await importCard(owner, lumiCard());
-    const lumi = old.characters[0].id;
-    const nox = (await importMember(owner, old.id, noxCard())).id;
-    await asImportedBefore(old.id, OLD);
-    await json(owner, `/api/plots/${old.id}/characters/reorder`, 'POST', { ids: [nox, lumi] });
-
-    // A work script added since the import: the creator's, and left as it is.
-    const edited = await importCard(owner, lumiCard());
-    await importMember(owner, edited.id, noxCard());
-    const mine = { ...OLD, displayScripts: [script('lumi', 0), script('all', 1)] };
-    await asImportedBefore(edited.id, mine);
-
-    // Today's import lifts it already.
-    const today = await importCard(owner, lumiCard());
-    await importMember(owner, today.id, noxCard());
-    const todayUi = (await storedOf(today.id)).customUi;
-
-    const before = await storedOf(old.id);
-    const backgroundBefore = (await readPlot(owner, old.id)).backgroundHtml;
-
-    // A dry run says what it would do and writes nothing.
-    const lines: string[] = [];
-    const dry = await repairMemberScripts(db, { apply: false, log: (line) => lines.push(line) });
-    expect(dry).toEqual({ scanned: 3, fixed: [old.id], current: 1, unaffected: 0, orderFirst: [], edited: [edited.id] });
-    expect(lines.join('\n')).toContain(`would lift into plot ${old.id} "lumi"`);
-    expect(lines.join('\n')).toContain('"nox": 1 display script, its stylesheet');
-    expect(lines.join('\n')).toContain(`kept the work's value of hp over "nox"'s`);
-    expect((await storedOf(old.id)).customUi).toEqual(OLD);
-
-    const applied = await repairMemberScripts(db, { apply: true, log: () => undefined });
-    expect(applied).toEqual(dry);
-    const after = await storedOf(old.id);
-    expect(after.customUi).toEqual({
-      // Lumi's stay the work's own, untagged; nox's run after them, on its messages.
-      displayScripts: [script('lumi', 0), script('nox', 1, nox)],
-      css: '.lumi { color: red; }',
-      memberCss: { [nox]: '.nox { color: blue; }' },
-      defaultVariables: { hp: '100', gold: '3' },
-    });
-    // A correction, not an edit; and the work draws what it drew.
-    expect(after.updatedAt).toEqual(before.updatedAt);
-    expect((await readPlot(owner, old.id)).backgroundHtml).toBe(backgroundBefore);
-    expect((await storedOf(edited.id)).customUi).toEqual(mine);
-    expect((await storedOf(today.id)).customUi).toEqual(todayUi);
-
-    // Again: nothing left to do.
-    const again = await repairMemberScripts(db, { apply: true, log: () => undefined });
-    expect(again).toEqual({ scanned: 3, fixed: [], current: 2, unaffected: 0, orderFirst: [], edited: [edited.id] });
-    expect((await storedOf(old.id)).customUi).toEqual(after.customUi);
-  });
-});
-
-describe('display-order repair', () => {
-  /** RisuAI runs beta (`<order 3>`), then alpha (`<order 1>`), then gamma (none, 0). */
-  const orderedCard = (name: string, customScripts?: unknown[]): File =>
-    new File(
-      [
-        JSON.stringify({
-          ...v2Card,
-          data: {
-            ...v2Card.data,
-            name,
-            extensions: {
-              risuai: {
-                defaultVariables: 'hp=100',
-                customScripts: customScripts ?? [
-                  { comment: '', in: 'alpha', out: '<i>A</i>', type: 'editdisplay', ableFlag: true, flag: 'g<order 1>' },
-                  { comment: '', in: 'beta', out: '<i>B</i>', type: 'editdisplay', ableFlag: true, flag: '<order 3>' },
-                  { comment: '', in: 'gamma', out: '<i>C</i>', type: 'editdisplay' },
-                ],
-              },
-            },
-          },
-        }),
-      ],
-      `${name}.json`,
-      { type: 'application/json' },
-    );
-
-  /** What the import before 353c976 stored for that card: RisuAI's numbers, run lowest first. */
-  const OLD = [
-    { in: 'alpha', out: '<i>A</i>', flags: 'g', order: 1, enabled: true },
-    { in: 'beta', out: '<i>B</i>', order: 3, enabled: true },
-    { in: 'gamma', out: '<i>C</i>', order: 2, enabled: true },
-  ];
-  /** Today's import of it. */
-  const NOW = [
-    { in: 'beta', out: '<i>B</i>', order: 0, enabled: true },
-    { in: 'alpha', out: '<i>A</i>', flags: 'g', order: 1, enabled: true },
-    { in: 'gamma', out: '<i>C</i>', order: 2, enabled: true },
-  ];
-
-  const storedOf = async (id: string) => {
-    const [row] = await db
-      .select({ customUi: plots.customUi, updatedAt: plots.updatedAt })
-      .from(plots)
-      .where(eq(plots.id, id));
-    return row!;
-  };
-
-  /** Puts a plot back the way an import before the fix left it. */
-  const asImportedBefore = (id: string, displayScripts: unknown[]) =>
-    db
-      .update(plots)
-      .set({ customUi: { displayScripts: displayScripts as never, defaultVariables: { hp: '100' } } })
-      .where(eq(plots.id, id));
-
-  it('rewrites the plots an old import left, leaves edited ones and cards without an order, and runs once', async () => {
-    const cookie = await signUp('display-order@example.com');
-    // Today's import already gets it right — the scripts its member's own.
-    const imported = await importCard(cookie, orderedCard('정렬'));
-    // RisuAI's own numbers ride beside the sequence (`rank`), for sorting with modules' scripts.
-    const RANKS: Record<string, number> = { beta: 3, alpha: 1 };
-    const tagged = NOW.map((script) => ({
-      ...script,
-      ...(RANKS[script.in] !== undefined ? { rank: RANKS[script.in] } : {}),
-      memberId: imported.characters[0].id,
-    }));
-    expect(imported.customUi.displayScripts).toEqual(tagged);
-
-    const old = await importCard(cookie, orderedCard('예전'));
-    await asImportedBefore(old.id, OLD);
-    // A second member in front of the one the scripts came from.
-    await addCharacter(cookie, old.id, { name: '조연' });
-    await json(cookie, `/api/plots/${old.id}/characters/reorder`, 'POST', {
-      ids: [...(await readPlot(cookie, old.id)).characters.map((member: { id: string }) => member.id)].reverse(),
-    });
-
-    const edited = await importCard(cookie, orderedCard('고친'));
-    const mine = [OLD[0], { ...OLD[1], out: '<b>B</b>' }, OLD[2]];
-    await asImportedBefore(edited.id, mine);
-
-    // No `<order N>` on the card: its scripts are never this repair's.
-    const plain = await importCard(
-      cookie,
-      orderedCard('평범', [{ comment: '', in: 'hp', out: '<b>hp</b>', type: 'editdisplay', ableFlag: true, flag: 'g<move_top>' }]),
-    );
-    const plainOld = [{ in: 'hp', out: '<b>hp</b>', flags: 'g', order: 0, action: 'move_top', enabled: true }];
-    await asImportedBefore(plain.id, plainOld);
-    const before = await storedOf(old.id);
-
-    // A dry run says what it would do and writes nothing.
-    const lines: string[] = [];
-    const dry = await repairDisplayOrder(db, { apply: false, log: (line) => lines.push(line) });
-    expect(dry).toEqual({ scanned: 4, fixed: [old.id], current: 1, edited: [edited.id] });
-    expect(lines.join('\n')).toContain(`would fix plot ${old.id} "예전"`);
-    expect(lines.join('\n')).toContain('was: "alpha" → "gamma" → "beta"');
-    expect(lines.join('\n')).toContain('now: "beta" → "alpha" → "gamma"');
-    expect((await storedOf(old.id)).customUi?.displayScripts).toEqual(OLD);
-
-    const applied = await repairDisplayOrder(db, { apply: true, log: () => undefined });
-    expect(applied).toEqual(dry);
-    const after = await storedOf(old.id);
-    // The rest of the custom UI stays, and so does the plot's place in its owner's list.
-    expect(after.customUi).toEqual({ displayScripts: NOW, defaultVariables: { hp: '100' } });
-    expect(after.updatedAt).toEqual(before.updatedAt);
-    expect((await storedOf(edited.id)).customUi?.displayScripts).toEqual(mine);
-    expect((await storedOf(plain.id)).customUi?.displayScripts).toEqual(plainOld);
-    expect((await storedOf(imported.id)).customUi?.displayScripts).toEqual(tagged);
-
-    // Again: nothing left to do.
-    const again = await repairDisplayOrder(db, { apply: true, log: () => undefined });
-    expect(again).toEqual({ scanned: 4, fixed: [], current: 2, edited: [edited.id] });
-    expect((await storedOf(old.id)).customUi?.displayScripts).toEqual(NOW);
-  });
 });
 
 describe('the game layer', () => {
@@ -6990,13 +6803,6 @@ describe('presets', () => {
     const patched = await readJson(await json(cookie, `/api/chats/${chatId}`, 'PATCH', { preset: 'default' }));
     expect(patched.chat.preset).toBe('default');
     expect((await readJson(await request(cookie, `/api/chats/${chatId}`))).chat.preset).toBe('default');
-
-    // A row still naming one of the five style presets that were — migration 0032
-    // moved every chat off them — assembles the default all the same.
-    await db.update(chats).set({ preset: 'screenplay' }).where(eq(chats.id, chatId));
-    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
-    expect(prompts.at(-1)!.system).toBe(sent.system);
-    expect(prompts.at(-1)!.messages.at(-1)).toEqual({ role: 'system', content: OAI_JAILBREAK });
   });
 
   it('rejects an unknown preset without touching the chat', async () => {
@@ -16081,28 +15887,22 @@ describe('what a card loads from other hosts, brought in at import', () => {
     expect(after.customUi.css).toBe('@import "https://fonts.test/sneaky.css";\n.a{color:red}');
   });
 
-  it('localizes a plot imported before (fix:localize-assets): a dry run finds, a run brings in, a second has nothing to fetch', async () => {
+  it('brings in what a plot names, a stylesheet under its media, and fetches nothing twice', async () => {
     const { asked, remoteFetch } = remote();
     const cookie = await signUp('localize-fix@example.com');
     const plot = await createPlot(cookie, {
       intros: ['<img src="//cdn.test/hello.png">'],
       customUi: { css: '@import url(https://fonts.test/css?family=Nanum) screen;' },
     });
-    const before = (await readPlot(cookie, plot.id)).updatedAt;
     const scope = { plot: true, modules: 'all' } as const;
-    const dry = await localizePlot({ db, storage, remoteFetch }, plot.id, scope, { dryRun: true });
-    expect(dry.found.map((ref) => ref.kind)).toEqual(['src', 'import']);
-    expect(asked).toEqual([]);
-
-    const done = await localizePlot({ db, storage, remoteFetch }, plot.id, scope, { touch: false });
+    const done = await localizePlot({ db, storage, remoteFetch }, plot.id, scope);
     expect(done).toMatchObject({ failed: 0, overLimit: 0, stored: 2 });
     const after = await readPlot(cookie, plot.id);
-    expect(after.updatedAt).toBe(before);
     expect(after.intros[0]).toBe(`<img src="/api/plots/${plot.id}/assets/hello">`);
     expect(after.customUi.css).toMatch(/^@media screen \{\n\/\* https:\/\/fonts\.test\/css\?family=Nanum \*\/\n@font-face/);
 
     const again = await localizePlot({ db, storage, remoteFetch }, plot.id, scope);
-    expect(again).toMatchObject({ failed: 0, overLimit: 0, stored: 0, found: [] });
+    expect(again).toMatchObject({ failed: 0, overLimit: 0, stored: 0 });
     expect(asked).toHaveLength(3);
   });
 

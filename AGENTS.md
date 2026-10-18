@@ -116,11 +116,13 @@ the `mcr.microsoft.com/playwright` image whose version matches
 
 ## Migrations
 
-`pnpm db:generate` writes the next numbered migration into
-`apps/plot/packages/db/drizzle/`. Nothing applies it by hand: the app migrates
-its folder at every start, the API suite migrates its in-memory database, and
-the browser suite's API its fresh folder. Main's dev data takes a new migration
-the next time main's app starts, so restart it after landing one.
+`apps/plot/packages/db/drizzle/` holds one initial migration, `0000_init`,
+generated from `src/schema` with `CREATE EXTENSION IF NOT EXISTS vector;` added
+at its top by hand. `pnpm db:generate` writes the next numbered migration beside
+it. Nothing applies it by hand: the app migrates its folder at every start, the
+API suite migrates its in-memory database, and the browser suite's API its fresh
+folder. Main's dev data takes a new migration the next time main's app starts,
+so restart it after landing one.
 
 ## Product rules
 

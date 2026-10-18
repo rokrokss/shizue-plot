@@ -10,11 +10,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "NODE_ENV=production node dist/index.js",
     "test": "vitest run",
-    "fix:display-order": "tsx src/maintenance/fixDisplayOrder.ts",
-    "fix:member-scripts": "tsx src/maintenance/fixMemberScripts.ts",
-    "fix:localize-assets": "tsx src/maintenance/fixLocalizeAssets.ts",
-    "fix:lore-aliases": "tsx src/maintenance/fixLoreAliases.ts",
-    "import:postgres": "tsx src/maintenance/importPostgres.ts",
     "embedder:fetch": "tsx src/maintenance/fetchEmbedder.ts"
   },
   "dependencies": {
@@ -31,7 +26,6 @@
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
-    "postgres": "3.4.9",
     "tsx": "^4.23.6",
     "typescript": "^5.9.3",
     "vitest": "^4.1.11"

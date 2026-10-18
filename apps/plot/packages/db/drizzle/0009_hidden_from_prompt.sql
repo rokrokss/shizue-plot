@@ -1,1 +1,0 @@
-ALTER TABLE "messages" ADD COLUMN "hidden_from_prompt" boolean DEFAULT false NOT NULL;
