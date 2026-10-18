@@ -334,7 +334,7 @@ test('hides a message from the AI and shows it again, on screen either way', asy
   for (const row of [turn, reply]) {
     await row.hover();
     const hidden = page.waitForResponse((response) => response.url().endsWith('/hidden'));
-    await row.getByRole('button', { name: 'AI에게 숨기기' }).click();
+    await row.getByRole('button', { name: 'AI에게 숨기기', exact: true }).click();
     expect((await hidden).status()).toBe(200);
     await expect(row.getByTestId('message-hidden')).toHaveText('AI에게 숨김');
   }
@@ -349,7 +349,7 @@ test('hides a message from the AI and shows it again, on screen either way', asy
 
   for (const row of [userMessages().last(), assistantMessages().last()]) {
     await row.hover();
-    await row.getByRole('button', { name: 'AI에게 다시 보이기' }).click();
+    await row.getByRole('button', { name: 'AI에게 다시 보이기', exact: true }).click();
   }
   await expect(page.getByTestId('message-hidden')).toHaveCount(0);
   await expectComposerIdle();

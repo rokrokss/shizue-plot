@@ -37,7 +37,8 @@ describe('sentHistoryTexts', () => {
     ];
     expect(sentHistoryTexts(input(history, { variables: { route: '3', mood: '설렘' } }))).toEqual([
       '셋째 길',
-      '유저가 도서관에 들어선다. 설렘',
+      // RisuAI's {{char}}: the work's one member.
+      '유저가 리안에 들어선다. 설렘',
       '스크립트가 바꾼 글',
     ]);
   });

@@ -133,6 +133,16 @@ describe('registry profile requests, as PocketRisu sends them', () => {
     });
   }
 
+  it('caches a system string marked systemCachePoint as PocketRisu caches a marked leading system turn', async () => {
+    const profileId = 'anthropic:sonnet-5';
+    const values = { ...seeded(pocketSnapshot(raw as never, profileId)), effort: 'high' };
+    const theirs = pocketRisuRequest(pocketSnapshot(raw as never, profileId), values, oracleMessages('', CACHED), 'test-key-1234', false);
+    const marked = await ourRequest(profileId, values, { model: '', system: SYSTEM, systemCachePoint: true, messages: CACHED.slice(1), maxTokens: 1200 });
+    expect(marked.body).toBe(theirs.body);
+    const unmarked = await ourRequest(profileId, values, { model: '', system: SYSTEM, messages: CACHED.slice(1), maxTokens: 1200 });
+    expect(JSON.parse(unmarked.body).system).toBe(SYSTEM);
+  });
+
   it('sends what each profile ships with: the reply cap, thinking, and nothing the model refuses', async () => {
     const body = async (profileId: string, values: Record<string, unknown> = {}) =>
       JSON.parse((await ourRequest(profileId, { ...seeded(pocketSnapshot(raw as never, profileId)), ...values }, { model: '', system: SYSTEM, messages: CHAT, maxTokens: 30 })).body) as Record<string, any>;

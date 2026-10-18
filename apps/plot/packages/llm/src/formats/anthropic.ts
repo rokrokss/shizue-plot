@@ -61,9 +61,10 @@ export function anthropicTurns(req: Pick<ChatRequest, 'system' | 'messages'>): {
 /**
  * `anthropicTurns` with where the prompt cache's marks fell: which turns hold
  * a message marked `cachePoint` (a turn made of several, if any of them is),
- * and whether a system turn that went into `system` was.
+ * and whether a system turn that went into `system` was — or the system
+ * string itself (`systemCachePoint`).
  */
-function cachedTurns(req: Pick<ChatRequest, 'system' | 'messages'>): {
+function cachedTurns(req: Pick<ChatRequest, 'system' | 'systemCachePoint' | 'messages'>): {
   system: string;
   messages: Turn[];
   cached: boolean[];
@@ -72,7 +73,7 @@ function cachedTurns(req: Pick<ChatRequest, 'system' | 'messages'>): {
   const system: string[] = req.system ? [req.system] : [];
   const turns: Turn[] = [];
   const cached: boolean[] = [];
-  let systemCached = false;
+  let systemCached = req.systemCachePoint === true;
   const add = (role: Turn['role'], blocks: Block[], cachePoint: boolean): void => {
     const kept = blocks.filter((block) => block.type !== 'text' || block.text.length > 0);
     if (kept.length === 0) return;

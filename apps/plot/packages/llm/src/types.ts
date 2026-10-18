@@ -85,6 +85,12 @@ export interface ChatRequest extends SamplingValues {
   /** Provider-native model name. */
   model: string;
   system: string;
+  /**
+   * RisuAI's `cachePoint` on the turns `system` was joined from: the system is
+   * cached as a leading system message marked `cachePoint` would be. Only an
+   * Anthropic profile's request reads it.
+   */
+  systemCachePoint?: boolean;
   messages: ChatMessage[];
   /** The reply's token cap, which the prompt's budget reserves too. */
   maxTokens: number;

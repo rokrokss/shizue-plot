@@ -2597,12 +2597,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
    * /hide): it stays on screen either way. The server answers with the chat, as
    * a delete does — the memory may have dropped a summary that covered it.
    */
-  async function toggleHidden(message: ChatMessage): Promise<void> {
+  async function toggleHidden(message: ChatMessage, above = false): Promise<void> {
     if (!beginMutation()) return;
     try {
       applyState(
         await apiSend<ChatState>('PUT', `/api/chats/${id}/messages/${message.id}/hidden`, {
           hidden: !message.hiddenFromPrompt,
+          // RisuAI's "disable above": every message before it too.
+          ...(above ? { above: true } : {}),
         }),
       );
     } catch (caught) {
@@ -3117,6 +3119,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                 <>
                   <ModuleToggles
                     text={chatModules?.toggles ?? ''}
+                    jailbreak={chatModules?.jailbreak ?? false}
                     values={state.globalVariables}
                     onSet={setGlobalVariable}
                     local={state.chat.localToggles ?? false}
@@ -3312,6 +3315,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                         {...(source && !mode ? { onDelete: () => void deleteMessage(source.id) } : {})}
                         {...(message.hidden ? { hidden: true } : {})}
                         {...(source && !mode ? { onToggleHidden: () => void toggleHidden(source) } : {})}
+                        {...(source && !mode ? { onHideAbove: () => void toggleHidden(source, true) } : {})}
                         footer={
                           isLast && showActions
                             ? (edit: (() => void) | null) => (

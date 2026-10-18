@@ -1,13 +1,17 @@
 import {
   groupOtherBotRoleOf,
   normalizeFormatingOrder,
+  normalizePresetRegex,
+  normalizePromptSettings,
   normalizePromptTemplate,
   READER_PRESET_INTEGRATION_MAX,
   READER_PRESET_NAME_MAX,
+  READER_PRESET_REGEX_MAX,
   READER_PRESET_TEMPLATE_ITEMS_MAX,
   READER_PRESET_TEXT_MAX,
   type FormatOrderItem,
   type GroupOtherBotRole,
+  type PromptSettings,
   type PromptTemplateItem,
 } from '@shizue/core';
 import { readerPresets, type ReaderPreset } from '@shizue/db';
@@ -38,6 +42,10 @@ const toReaderPresetJson = (preset: ReaderPreset) => ({
   moduleIntegration: preset.moduleIntegration,
   /** RisuAI's `templateDefaultVariables`: `key=value` lines a chat on it reads for a variable nothing set. */
   defaultVariables: preset.defaultVariables,
+  /** RisuAI's `promptSettings`; null for every one off. */
+  promptSettings: normalizePromptSettings(preset.promptSettings) ?? null,
+  /** RisuAI's preset regex, its scripts as saved; [] for none. */
+  regex: normalizePresetRegex(preset.regex),
   createdAt: preset.createdAt.toISOString(),
   updatedAt: preset.updatedAt.toISOString(),
 });
@@ -54,6 +62,35 @@ interface PresetFields {
   toggles?: string;
   moduleIntegration?: string;
   defaultVariables?: string;
+  promptSettings?: PromptSettings | null;
+  regex?: Record<string, unknown>[] | null;
+}
+
+/** `promptSettings`: null for every one off, else RisuAI's settings (unknown ones dropped). */
+function settingsOf(value: unknown): PromptSettings | null {
+  if (value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw badRequest('invalid_request', 'promptSettings must be an object or null');
+  }
+  const settings = normalizePromptSettings(value) ?? null;
+  if ((settings?.postEndInnerFormat?.length ?? 0) > READER_PRESET_TEXT_MAX) {
+    throw badRequest('reader_preset_limit', `postEndInnerFormat must be at most ${READER_PRESET_TEXT_MAX} characters`);
+  }
+  return settings;
+}
+
+/** `regex`: null for none, else RisuAI's scripts, each an object, all within the caps. */
+function regexOf(value: unknown): Record<string, unknown>[] | null {
+  if (value === null) return null;
+  if (!Array.isArray(value)) throw badRequest('invalid_request', 'regex must be an array or null');
+  if (value.length > READER_PRESET_REGEX_MAX) {
+    throw badRequest('reader_preset_limit', `regex may hold at most ${READER_PRESET_REGEX_MAX} scripts`);
+  }
+  const scripts = normalizePresetRegex(value);
+  if (scripts.some((script) => JSON.stringify(script).length > READER_PRESET_TEXT_MAX)) {
+    throw badRequest('reader_preset_limit', `a regex script must be at most ${READER_PRESET_TEXT_MAX} characters`);
+  }
+  return scripts.length > 0 ? scripts : null;
 }
 
 /** `formatingOrder`: null for RisuAI's default, else an array of its block names. */
@@ -100,6 +137,8 @@ function presetFields(body: Record<string, unknown>): PresetFields {
   const toggles = optionalString(body, 'toggles');
   const moduleIntegration = optionalString(body, 'moduleIntegration');
   const defaultVariables = optionalString(body, 'defaultVariables');
+  const promptSettings = 'promptSettings' in body ? settingsOf(body['promptSettings']) : undefined;
+  const regex = 'regex' in body ? regexOf(body['regex']) : undefined;
   if (name === '') throw badRequest('invalid_request', 'name must not be blank');
   if (name !== undefined && name.length > READER_PRESET_NAME_MAX) {
     throw badRequest('reader_preset_limit', `name must be at most ${READER_PRESET_NAME_MAX} characters`);
@@ -134,6 +173,8 @@ function presetFields(body: Record<string, unknown>): PresetFields {
     ...(toggles !== undefined ? { toggles } : {}),
     ...(moduleIntegration !== undefined ? { moduleIntegration } : {}),
     ...(defaultVariables !== undefined ? { defaultVariables } : {}),
+    ...(promptSettings !== undefined ? { promptSettings } : {}),
+    ...(regex !== undefined ? { regex } : {}),
   };
 }
 
@@ -174,6 +215,8 @@ export function readerPresetRoutes(deps: AppDeps): Hono<AppEnv> {
         toggles: fields.toggles ?? '',
         moduleIntegration: fields.moduleIntegration ?? '',
         defaultVariables: fields.defaultVariables ?? '',
+        promptSettings: fields.promptSettings ?? null,
+        regex: fields.regex ?? null,
       })
       .returning();
     return c.json(toReaderPresetJson(created!), 201);

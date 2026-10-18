@@ -10,19 +10,37 @@ import { extensionsWithCustomUi } from './risu.js';
 import { extensionsWithDepthPrompt } from './sillyTavern.js';
 
 /**
- * depth/role have no V3 field of their own, so they go back out as decorators,
- * and so does a sticky or cooldown long enough to be the "after match" ones. A
- * switched-off entry says so as `@@dont_activate` too: RisuAI lore has no
- * `enabled`, so that line is the only off switch it reads.
+ * depth/role have no V3 field of their own, so they go back out as decorators
+ * — a depth counted from the end as RisuAI's `@@reverse_depth`, one counted from
+ * the start of its chat block as its `@@depth` — and so does a sticky or
+ * cooldown long enough to be the "after match" ones, and every RisuAI decorator
+ * the entry was read with (`LoreEntry.risu`, a `@@position`). A switched-off
+ * entry says so as `@@dont_activate` too: RisuAI lore has no `enabled`, so that
+ * line is the only off switch it reads.
  */
 function toContent(entry: LoreEntry): string {
   const decorators: string[] = [];
+  const risu = entry.risu ?? {};
   if (entry.depth !== undefined) {
-    decorators.push(`@@depth ${entry.depth}`);
-    if (entry.role) decorators.push(`@@role ${entry.role}`);
+    decorators.push(`@@${risu.depthFrom === 'start' ? 'depth' : 'reverse_depth'} ${entry.depth}`);
+  } else if (risu.slot !== undefined) {
+    decorators.push(`@@position pt_${risu.slot}`);
+  } else if (entry.positioned && (entry.position === 'before_char' || entry.position === 'after_char')) {
+    decorators.push(`@@position ${entry.position === 'before_char' ? 'before_desc' : 'after_desc'}`);
   }
+  if (entry.role) decorators.push(`@@role ${entry.role}`);
   if ((entry.sticky ?? 0) >= FOREVER_MESSAGES) decorators.push('@@keep_activate_after_match');
   if ((entry.cooldown ?? 0) >= FOREVER_MESSAGES) decorators.push('@@dont_activate_after_match');
+  if (risu.every !== undefined) decorators.push(`@@activate_only_every ${risu.every}`);
+  if (risu.greeting !== undefined) decorators.push(`@@is_greeting ${risu.greeting}`);
+  if (risu.priority !== undefined) decorators.push(`@@priority ${risu.priority}`);
+  if (risu.recursive) decorators.push('@@recursive');
+  if (risu.fullWord !== undefined) decorators.push(risu.fullWord ? '@@match_full_word' : '@@match_partial_word');
+  if (risu.inject) {
+    const { operation, location, param, lore } = risu.inject;
+    decorators.push(`@@${lore ? 'inject_lore' : 'inject_at'} ${location}`);
+    if (operation !== 'append') decorators.push(`@@inject_${operation} ${param}`);
+  }
   if (!entry.enabled) decorators.push('@@dont_activate');
   return decorators.length > 0 ? `${decorators.join('\n')}\n${entry.content}` : entry.content;
 }
@@ -191,7 +209,7 @@ export function exportCardV3(card: NormalizedCard, overlay: CardPlotOverlay = {}
         // trip — and our own mark, which tells our ST-shaped entries from ST's
         // own (`BOOK_MARK`).
         extensions: {
-          ...(card.loreSettings.risuMatching ? { risu_fullWordMatching: false } : {}),
+          ...(card.loreSettings.risuMatching ? { risu_fullWordMatching: card.loreSettings.fullWordMatching === true } : {}),
           [BOOK_MARK]: true,
         },
         scan_depth: card.loreSettings.scanDepth,

@@ -20,7 +20,8 @@ import { Button, ErrorText, Field, Select, TextArea, TextInput } from './ui';
 /**
  * What the editor holds: a preset being written, new (`id` null) or one being
  * changed — every field of the row, the ones it has no control for
- * (`formatingOrder`, the group settings) carried through to the save as they came.
+ * (`formatingOrder`, the group settings, the prompt settings and the regex)
+ * carried through to the save as they came.
  */
 interface Draft extends Omit<ReaderPreset, 'id' | 'createdAt' | 'updatedAt'> {
   id: string | null;
@@ -43,6 +44,8 @@ const newDraft = (name: string): Draft => ({
   toggles: '',
   moduleIntegration: '',
   defaultVariables: '',
+  promptSettings: null,
+  regex: [],
 });
 
 const fromRow = (preset: ReaderPreset): Draft => ({
@@ -58,6 +61,8 @@ const fromRow = (preset: ReaderPreset): Draft => ({
   toggles: preset.toggles ?? '',
   moduleIntegration: preset.moduleIntegration ?? '',
   defaultVariables: preset.defaultVariables ?? '',
+  promptSettings: preset.promptSettings ?? null,
+  regex: preset.regex ?? [],
 });
 
 const fromImport = (imported: ReaderPresetImport, name: string): Draft => ({
@@ -73,6 +78,8 @@ const fromImport = (imported: ReaderPresetImport, name: string): Draft => ({
   toggles: imported.toggles,
   moduleIntegration: imported.moduleIntegration,
   defaultVariables: imported.defaultVariables,
+  promptSettings: imported.promptSettings,
+  regex: imported.regex,
   imported,
 });
 
@@ -213,6 +220,8 @@ function ReaderPresetManager({
       toggles: draft.toggles,
       moduleIntegration: draft.moduleIntegration,
       defaultVariables: draft.defaultVariables,
+      promptSettings: draft.promptSettings,
+      regex: draft.regex.length > 0 ? draft.regex : null,
     };
     try {
       if (draft.id === null) {
@@ -530,6 +539,8 @@ function ImportNotice({ imported }: { imported: ReaderPresetImport }) {
     imported.toggles.trim() ? t('tookToggles') : '',
     imported.moduleIntegration.trim() ? t('tookIntegration', { names: imported.moduleIntegration.trim() }) : '',
     imported.defaultVariables.trim() ? t('tookDefaultVariables') : '',
+    imported.promptSettings ? t('tookPromptSettings') : '',
+    imported.regex.length > 0 ? t('tookRegex', { count: imported.regex.length }) : '',
     names.length > 0 ? t('ignoredPrompts', { count: names.length, names: names.join(', ') }) : '',
     imported.ignoredSettings ? t('ignoredSettings') : '',
   ].filter((line) => line.length > 0);
@@ -538,7 +549,9 @@ function ImportNotice({ imported }: { imported: ReaderPresetImport }) {
     !template?.length &&
     !imported.toggles.trim() &&
     !imported.moduleIntegration.trim() &&
-    !imported.defaultVariables.trim();
+    !imported.defaultVariables.trim() &&
+    !imported.promptSettings &&
+    imported.regex.length === 0;
 
   return (
     <div data-testid="reader-preset-import-notice" className="space-y-1 rounded-lg bg-raised px-3 py-2 text-xs text-muted">

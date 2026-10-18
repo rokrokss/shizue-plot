@@ -1,5 +1,12 @@
 import { CCardLib, type CharacterCardV3 } from '@risuai/ccardlib';
-import { DEFAULT_LORE_SETTINGS, type CardSpec, type LoreEntry, type LoreSettings, type NormalizedCard } from '../types.js';
+import {
+  DEFAULT_LORE_SETTINGS,
+  RISU_DEFAULT_SCAN_DEPTH,
+  type CardSpec,
+  type LoreEntry,
+  type LoreSettings,
+  type NormalizedCard,
+} from '../types.js';
 import { loreEntriesOfBook } from './bookEntry.js';
 import { componentCapabilitiesFromExtensions, componentCodeFromExtensions } from './componentCode.js';
 import { introFromExtensions } from './intro.js';
@@ -97,27 +104,32 @@ function isRisuAiBook(book: Book, cardExtensions: Json): boolean {
 /**
  * The book's settings, each the card's own where it has one.
  *
- * A RisuAI book differs in two ways, so it runs as its creator tested it. Its
- * plain keys are matched RisuAI's way (`risuMatching`) — unless the book asks
- * for RisuAI's whole-word matching, which is not implemented, and to which exact
- * matching is the nearer. And it scans recursively unless it says otherwise in
- * RisuAI's terms: RisuAI takes `recursive_scanning` only together with
- * `scan_depth` and `token_budget` (all three or none, `convertCharbook`), and
- * without them recursion is on — a fixed default there, not a reader's setting.
- * Its depth and budget without them are the reader's settings there (5 messages
- * and 800 tokens by default), so ours stand in for those: depth 4 and the
- * automatic budget.
+ * A RisuAI book is read as RisuAI reads it (`convertCharbook`), so it runs as
+ * its creator tested it: its plain keys are matched RisuAI's way
+ * (`risuMatching`), and its four settings — `scan_depth`, `token_budget`,
+ * `recursive_scanning` and `risu_fullWordMatching` — count only when the first
+ * three are all there. Without them RisuAI scans the reader's lorebook depth (5
+ * on every install, `RISU_DEFAULT_SCAN_DEPTH`) with recursion on, a fixed
+ * default there, and spends the reader's lorebook budget, for which the
+ * automatic one stands in here.
  */
 function loreSettingsOf(book: Book, cardExtensions: Json): LoreSettings {
-  const risu = isRisuAiBook(book, cardExtensions);
   const allThree = book?.scan_depth != null && book.token_budget != null && book.recursive_scanning != null;
+  if (isRisuAiBook(book, cardExtensions)) {
+    if (!allThree) return { scanDepth: RISU_DEFAULT_SCAN_DEPTH, recursiveScanning: true, risuMatching: true };
+    return {
+      scanDepth: book.scan_depth!,
+      tokenBudget: book.token_budget!,
+      recursiveScanning: book.recursive_scanning!,
+      risuMatching: true,
+      ...(book.extensions?.['risu_fullWordMatching'] === true ? { fullWordMatching: true } : {}),
+    };
+  }
   return {
     scanDepth: book?.scan_depth ?? DEFAULT_LORE_SETTINGS.scanDepth,
     // Only the card's own number: without one the budget is the automatic one.
     ...(typeof book?.token_budget === 'number' ? { tokenBudget: book.token_budget } : {}),
-    recursiveScanning:
-      risu && !allThree ? true : (book?.recursive_scanning ?? DEFAULT_LORE_SETTINGS.recursiveScanning),
-    ...(risu && book?.extensions?.['risu_fullWordMatching'] !== true ? { risuMatching: true } : {}),
+    recursiveScanning: book?.recursive_scanning ?? DEFAULT_LORE_SETTINGS.recursiveScanning,
   };
 }
 

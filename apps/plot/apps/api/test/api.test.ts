@@ -18,6 +18,7 @@ import {
   groupSpeakerLine,
   HYPA_V3_DEFAULTS,
   HYPA_V3_SUMMARIZATION_PROMPT,
+  JAILBREAK_TOGGLE_VARIABLE,
   DEFAULT_SUMMARIZATION_INSTRUCTION,
   IMAGE_ATTACHED_PLACEHOLDER,
   loreEntryKey,
@@ -45,6 +46,7 @@ import {
   OAI_JAILBREAK,
   PRESET_IDS,
   READER_PRESET_NAME_MAX,
+  READER_PRESET_REGEX_MAX,
   READER_PRESET_TEXT_MAX,
   RECALLED_MEMORY_HEADING,
   RETRIEVAL_DEFAULTS,
@@ -331,9 +333,9 @@ const sentText = (prompt: { system: string; messages: ChatRequest['messages'] })
 /** Adapter that records every chat-model request and replies through echo. */
 function capturingApp(overrides: Partial<AppDeps> = {}): {
   app: Hono<AppEnv>;
-  prompts: { system: string; messages: ChatRequest['messages']; maxTokens: number }[];
+  prompts: { system: string; messages: ChatRequest['messages']; maxTokens: number; systemCachePoint?: boolean }[];
 } {
-  const prompts: { system: string; messages: ChatRequest['messages']; maxTokens: number }[] = [];
+  const prompts: { system: string; messages: ChatRequest['messages']; maxTokens: number; systemCachePoint?: boolean }[] = [];
   const echo = createEchoAdapter();
   const app = makeApp({
     getAdapter: () => ({
@@ -342,7 +344,12 @@ function capturingApp(overrides: Partial<AppDeps> = {}): {
         stream: (req) => {
           // The cap goes in too: it is half of the reply-length setting, and the
           // request is the only place it is observable.
-          prompts.push({ system: req.system, messages: req.messages, maxTokens: req.maxTokens });
+          prompts.push({
+            system: req.system,
+            messages: req.messages,
+            maxTokens: req.maxTokens,
+            ...(req.systemCachePoint ? { systemCachePoint: true } : {}),
+          });
           return echo.stream(req);
         },
       },
@@ -3566,7 +3573,6 @@ describe('chats', () => {
       '아직 안 가셨군요, 유저.',
       '안녕하세요',
       SPEECH_PROTOCOL_REMINDER,
-      OAI_JAILBREAK,
     ]);
 
     // Clearing it takes it back out of the prompt.
@@ -3685,7 +3691,7 @@ describe('chats', () => {
     expect(after.chat.headMessageId).toBe(reply.id);
   });
 
-  it('keeps depth lore in its slot when continue re-attaches the partial reply', async () => {
+  it('keeps depth lore in its slot when continue goes on with the reply the chat ends on', async () => {
     const cookie = await signUp('depthlore@example.com');
     const { plotId, chatId } = await setupChat(cookie);
 
@@ -3718,23 +3724,19 @@ describe('chats', () => {
       'DEPTH LORE',
       '이어서',
       SPEECH_PROTOCOL_REMINDER,
-      OAI_JAILBREAK,
     ]);
 
     const before = await readJson(await request(cookie, `/api/chats/${chatId}`));
     await readSse(await json(cookie, `/api/chats/${chatId}/continue`, 'POST', undefined, capturing));
 
-    // Continue re-attaches the partial assistant message after everything the
-    // preset sends, so the entry has to stay one message from *that* end: at the
-    // truncated history's own end, which is depth 0 and goes with what follows
-    // the chat — not one message before it.
+    // RisuAI continues the reply its chat ends on as the chat's newest turn, so
+    // the entry is one message before it, and what follows the chat follows it.
     const continued = prompts.at(-1)!;
-    expect(continued.slice(-5)).toEqual([
+    expect(continued.slice(-4)).toEqual([
       { role: 'user', content: '이어서' },
-      { role: 'system', content: SPEECH_PROTOCOL_REMINDER },
       { role: 'system', content: 'DEPTH LORE' },
-      { role: 'system', content: OAI_JAILBREAK },
       { role: 'assistant', content: before.path[2].content },
+      { role: 'system', content: SPEECH_PROTOCOL_REMINDER },
     ]);
   });
 
@@ -3994,7 +3996,6 @@ describe('chats', () => {
       'history',
       'speech_protocol',
       'moved_lore',
-      'preset', // the jailbreak
     ]);
     // A regenerate replaces the assistant head: the history ends on the user turn.
     const turns = report.blocks.filter((block: { kind: string }) => block.kind === 'history');
@@ -4004,15 +4005,23 @@ describe('chats', () => {
       responseReserve: DEFAULT_MAX_RESPONSE_TOKENS,
     });
     expect(report.totals.used).toBeGreaterThan(0);
+    // Of one insertion order, in the reverse of the book's, as RisuAI sends them.
     expect(report.lore).toEqual([
-      expect.objectContaining({ source: 'plot', via: 'constant', preview: 'ALWAYS ON' }),
       expect.objectContaining({ source: 'plot', via: 'keyword', preview: 'KEYED ON', placement: 'before_char' }),
+      expect.objectContaining({ source: 'plot', via: 'constant', preview: 'ALWAYS ON' }),
     ]);
     // The keyword entry is not in the lorebook slot of the system string but its own block, after the newest turn.
     expect(report.blocks.find((block: { kind: string }) => block.kind === 'lorebook').text).toBe('ALWAYS ON');
     const sentKinds = report.blocks.map((block: { kind: string }) => block.kind);
     expect(report.blocks[sentKinds.indexOf('moved_lore')].text).toBe('KEYED ON');
-    expect(report.blocks.at(-1)).toMatchObject({ kind: 'preset', text: OAI_JAILBREAK });
+    // The preset's jailbreak goes only while the jailbreak toggle is on, which RisuAI starts off.
+    expect(report.blocks.map((block: { text: string }) => block.text)).not.toContain(OAI_JAILBREAK);
+    await json(owner, `/api/chats/${own.chat.id}/global-variables`, 'PATCH', {
+      variables: { [JAILBREAK_TOGGLE_VARIABLE]: '1' },
+      toggles: true,
+    });
+    const toggled = await readJson(await request(owner, `/api/chats/${own.chat.id}/inspect`));
+    expect(toggled.blocks.at(-1)).toMatchObject({ kind: 'preset', text: OAI_JAILBREAK });
     expect(await count()).toBe(before);
     expect(generatingOn(own.chat.id)).toBe(false);
   });
@@ -4614,9 +4623,9 @@ describe('chats', () => {
     const first = await readSse(await json(cookie, `/api/chats/${chatId}/auto`, 'POST', undefined, capturing));
     expect(first.at(-1)!.event).toBe('done');
 
-    // The nudge closes the request, after everything the preset sends — its jailbreak last of those.
+    // The nudge closes the request, after everything the preset sends.
     const nudge = prompts.at(-1)!.messages.at(-1)!;
-    expect(prompts.at(-1)!.messages.at(-2)).toEqual({ role: 'system', content: OAI_JAILBREAK });
+    expect(prompts.at(-1)!.messages.at(-2)).toEqual({ role: 'system', content: SPEECH_PROTOCOL_REMINDER });
     expect(nudge.role).toBe('system');
     expect(nudge.content).toContain('without the user stepping in');
     // {{user}} is expanded like anywhere else.
@@ -5618,7 +5627,7 @@ describe('custom UI', () => {
     expect(first.system).toContain('[현재 HP 40]');
     // The macro itself reaches the model untouched: it is the protocol the model
     // has to keep emitting.
-    expect(first.messages.at(-3)!.content).toBe('{{setvar::hp::40}} 다쳤다');
+    expect(first.messages.at(-2)!.content).toBe('{{setvar::hp::40}} 다쳤다');
     // getvar is a macro like any other, so it is expanded in the history too.
     expect(first.messages.some((message) => message.content === 'HP는 40')).toBe(true);
 
@@ -6253,7 +6262,7 @@ describe('chat attachments', () => {
 
     // The turn is split into parts, and the bytes travel inline: the serving
     // route is behind this reader's session, so a URL would be no use upstream.
-    const sent = prompts.at(-1)!.messages.at(-3)!;
+    const sent = prompts.at(-1)!.messages.at(-2)!;
     expect(sent.content).toEqual([
       { type: 'text', text: '이건 뭐야?' },
       { type: 'image', url: `data:image/gif;base64,${Buffer.from(gifOf(1)).toString('base64')}` },
@@ -6261,7 +6270,7 @@ describe('chat attachments', () => {
 
     // Regenerating the same turn shows the model the same thing.
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, seeing));
-    expect(prompts.at(-1)!.messages.at(-3)).toEqual(sent);
+    expect(prompts.at(-1)!.messages.at(-2)).toEqual(sent);
 
     // The next turn carries no image, and the previous turn's does not come
     // back with it — one turn's images are answered once.
@@ -6293,13 +6302,13 @@ describe('chat attachments', () => {
     const chatId = created.chat.id;
     await answerWithImages(cookie, chatId, '이건 뭐야?', [gifOf(1)], blind);
 
-    const sent = prompts.at(-1)!.messages.at(-3)!;
+    const sent = prompts.at(-1)!.messages.at(-2)!;
     expect(sent.content).toBe(`이건 뭐야?\n${IMAGE_ATTACHED_PLACEHOLDER}`);
     expect(reads).toBe(0);
 
     // And the same for the regenerate of a reply to it.
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, blind));
-    expect(prompts.at(-1)!.messages.at(-3)!.content).toBe(
+    expect(prompts.at(-1)!.messages.at(-2)!.content).toBe(
       `이건 뭐야?\n${IMAGE_ATTACHED_PLACEHOLDER}`,
     );
     expect(reads).toBe(0);
@@ -6666,6 +6675,27 @@ describe('hiding a message from the AI', () => {
     expect(sentText(prompts[2]!)).toContain('DRAGON LORE');
   });
 
+  it("hides a message and every one before it at once, RisuAI's disable above, and shows them again", async () => {
+    const cookie = await signUp('hide-above@example.com');
+    const { chatId } = await setupChat(cookie);
+    const { app: capturing, prompts } = capturingApp();
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '첫째 말' }, capturing));
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '둘째 말' }, capturing));
+    const before = await readJson(await request(cookie, `/api/chats/${chatId}`));
+    // The greeting, the first turn, its reply, the second turn, its reply: hidden up to the first reply.
+    const res = await json(cookie, `/api/chats/${chatId}/messages/${before.path[2].id}/hidden`, 'PUT', { hidden: true, above: true });
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect((await readJson(res)).path.map((m: any) => m.hiddenFromPrompt)).toEqual([true, true, true, false, false]);
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
+    const sent = sentTexts(prompts.at(-1)!);
+    expect(sent).toContain('둘째 말');
+    expect(sent).not.toContain('첫째 말');
+    expect(sent).not.toContain(before.path[0].content);
+    // Shown again, all of them at once.
+    const shown = await json(cookie, `/api/chats/${chatId}/messages/${before.path[2].id}/hidden`, 'PUT', { hidden: false, above: true });
+    expect((await readJson(shown)).path.map((m: any) => m.hiddenFromPrompt)).toEqual([false, false, false, false, false]);
+  });
+
   it('takes a boolean, on a message of this chat', async () => {
     const cookie = await signUp('hide-checks@example.com');
     const { chatId, state } = await setupChat(cookie);
@@ -6760,7 +6790,8 @@ describe('presets', () => {
     // OAI2's global-note item, before the chat, is the card's replacement.
     expect(sent.system).toContain('카드 전용 마무리');
     expect(sent.messages.some((message) => contentText(message.content).includes('카드 전용 마무리'))).toBe(false);
-    expect(sent.messages.at(-1)).toEqual({ role: 'system', content: OAI_JAILBREAK });
+    // Its jailbreak waits for the toggle, which starts off.
+    expect(sent.messages.at(-1)).toEqual({ role: 'system', content: SPEECH_PROTOCOL_REMINDER });
   });
 
   it('sends a utility bot RisuAI’s utility template, nothing of the preset around it', async () => {
@@ -6792,13 +6823,22 @@ describe('presets', () => {
     const { app: capturing, prompts } = capturingApp();
 
     // Default: the built-in OAI2 preset — its main prompt heads the system string,
-    // its response instructions are in it, and its jailbreak closes the request.
+    // its response instructions are in it, and its jailbreak closes the request
+    // once the jailbreak toggle is on, as RisuAI's does; the toggle starts off.
     expect(state.chat.preset).toBe('default');
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing));
     const sent = prompts.at(-1)!;
     expect(sent.system.startsWith(OAI2_MAIN_SENT)).toBe(true);
     expect(sent.system).toContain(OAI2_RESPONSE);
-    expect(sent.messages.at(-1)).toEqual({ role: 'system', content: OAI_JAILBREAK });
+    expect(sent.messages.map((message) => message.content)).not.toContain(OAI_JAILBREAK);
+    const modules = await readJson(await request(cookie, `/api/chats/${chatId}/modules`));
+    expect(modules.jailbreak).toBe(true);
+    await json(cookie, `/api/chats/${chatId}/global-variables`, 'PATCH', {
+      variables: { [JAILBREAK_TOGGLE_VARIABLE]: '1' },
+      toggles: true,
+    });
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
+    expect(prompts.at(-1)!.messages.at(-1)).toEqual({ role: 'system', content: OAI_JAILBREAK });
 
     const patched = await readJson(await json(cookie, `/api/chats/${chatId}`, 'PATCH', { preset: 'default' }));
     expect(patched.chat.preset).toBe('default');
@@ -6904,6 +6944,77 @@ describe('reader presets', () => {
     await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: null });
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
     expect(JSON.stringify(prompts.at(-1)!.messages)).toContain('[null] [3]');
+  });
+
+  it("keeps the preset's prompt settings and regex, and sends by them as RisuAI's sendChat does", async () => {
+    // database.svelte.ts saves both in the preset (`promptSettings`, `regex: db.presetRegex`);
+    // index.svelte.ts pushes `postEndInnerFormat` after the post-everything item,
+    // and scripts.ts runs `db.presetRegex` ahead of the character's scripts.
+    const cookie = await signUp('reader-preset-settings@example.com');
+    const { chatId } = await setupChat(cookie);
+    const script = { comment: '', in: '반가워', out: 'PRESET-REGEX', type: 'editprocess', ableFlag: false };
+    const res = await create(cookie, {
+      name: '설정',
+      promptTemplate: [
+        { type: 'plain', type2: 'main', role: 'system', text: '메인' },
+        { type: 'chat', rangeStart: 0, rangeEnd: 'end' },
+        { type: 'postEverything' },
+      ],
+      promptSettings: { postEndInnerFormat: 'POST-END', bogus: true },
+      regex: [script, 'not a script'],
+    });
+    expect(res.status).toBe(201);
+    const preset = await readJson(res);
+    expect(preset).toMatchObject({ promptSettings: { postEndInnerFormat: 'POST-END' }, regex: [script] });
+    for (const body of [
+      { name: 'n', promptSettings: [] },
+      { name: 'n', regex: {} },
+      { name: 'n', regex: Array.from({ length: READER_PRESET_REGEX_MAX + 1 }, () => script) },
+      { name: 'n', regex: [{ ...script, out: 'x'.repeat(READER_PRESET_TEXT_MAX) }] },
+      { name: 'n', promptSettings: { postEndInnerFormat: 'x'.repeat(READER_PRESET_TEXT_MAX + 1) } },
+    ]) {
+      expect((await create(cookie, body)).status, JSON.stringify(body).slice(0, 40)).toBe(400);
+    }
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: preset.id });
+
+    const { app: capturing, prompts } = capturingApp();
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '반가워' }, capturing));
+    const sent = prompts.at(-1)!;
+    expect(sent.messages).toContainEqual({ role: 'system', content: 'POST-END' });
+    expect(sent.messages).toContainEqual({ role: 'user', content: 'PRESET-REGEX' });
+    expect(JSON.stringify(sent.messages)).not.toContain('반가워');
+
+    // Cleared, neither is sent.
+    const cleared = await readJson(await json(cookie, `/api/reader-presets/${preset.id}`, 'PUT', { promptSettings: null, regex: null }));
+    expect([cleared.promptSettings, cleared.regex]).toEqual([null, []]);
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));
+    expect(JSON.stringify(prompts.at(-1)!.messages)).not.toContain('POST-END');
+    expect(prompts.at(-1)!.messages).toContainEqual({ role: 'user', content: '반가워' });
+  });
+
+  it("marks Claude's cache points where the template's cache items are, as RisuAI does", async () => {
+    // index.svelte.ts `case 'cache'`: from the turn before the item back, the
+    // first `depth` turns of its role (any, for 'all') get `cachePoint`.
+    const cookie = await signUp('reader-preset-cache@example.com');
+    const { chatId } = await setupChat(cookie);
+    const preset = await readJson(
+      await create(cookie, {
+        name: '캐시',
+        promptTemplate: [
+          { type: 'plain', type2: 'main', role: 'system', text: '메인' },
+          { type: 'cache', depth: 1, role: 'all' },
+          { type: 'chat', rangeStart: 0, rangeEnd: 'end' },
+          { type: 'cache', depth: 1, role: 'user' },
+        ],
+      }),
+    );
+    await json(cookie, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: preset.id });
+    const { app: capturing, prompts } = capturingApp();
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '캐시해 줘' }, capturing));
+    const sent = prompts.at(-1)!;
+    // The main prompt is the system string, which the first item marked.
+    expect(sent.systemCachePoint).toBe(true);
+    expect(sent.messages.filter((message) => message.cachePoint)).toEqual([{ role: 'user', content: '캐시해 줘', cachePoint: true }]);
   });
 
   it('gives way to the card’s own instructions', async () => {
@@ -7198,7 +7309,7 @@ describe('memory', () => {
     expect(prompt.messages.some((message) => contentText(message.content).includes(sent[0]!))).toBe(false);
     // The second reader turn is covered; its assistant echo is still verbatim.
     expect(prompt.messages.filter((message) => contentText(message.content).includes(sent[1]!))).toHaveLength(1);
-    expect(contentText(prompt.messages.at(-3)!.content)).toBe('그 다음은?');
+    expect(contentText(prompt.messages.at(-2)!.content)).toBe('그 다음은?');
   });
 
   it('strips image references from the summarization transcript', async () => {
@@ -8489,6 +8600,29 @@ describe('memory', () => {
     // The pick is left as the reader made it: the model may come back.
     const [row] = await db.select({ modelBinding: chats.modelBinding }).from(chats).where(eq(chats.id, chatId));
     expect(row!.modelBinding).toEqual({ sub: 'test/text' });
+  });
+
+  it("sends a card's Additional Text the chat's opening finds, as RisuAI's additionalInformations does", async () => {
+    const cookie = await signUp('additional-text@example.com');
+    const embedder = keywordEmbedder();
+    const harness = memoryApp({ embedder });
+    const { plotId, chatId } = await setupChat(cookie);
+    const member = await firstMember(cookie, plotId);
+    const additionalText = ['고양이 이야기.', '등대 이야기.', '지도 이야기.', '다른 이야기.'].join('\n\n');
+    await patchCharacter(cookie, plotId, member.id, {
+      card: { ...member.card, extensions: { ...member.card.extensions, risuai: { additionalText } } },
+    });
+    await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '등대로 가자' }, harness.app));
+    const system = harness.prompts.at(-1)!.system;
+    // The three closest chunks, the nearest first, right after the card's description:
+    // the one the opening names, then the one that names nothing else, then the first of the rest.
+    expect(system).toContain('등대 이야기.\n\n다른 이야기.\n\n고양이 이야기.');
+    expect(system).not.toContain('지도 이야기.');
+    expect(system.indexOf(member.card.description)).toBeLessThan(system.indexOf('등대 이야기.'));
+    // Without an embedder, the description goes without it.
+    const { app: plain, prompts } = capturingApp();
+    await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, plain));
+    expect(prompts.at(-1)!.system).not.toContain('등대 이야기.');
   });
 
   it('ends a backfill quietly once the chat is gone', async () => {
@@ -9921,23 +10055,24 @@ describe('plot assets', () => {
     expect(state.path.map((message: any) => message.content)).toContain(content);
   });
 
-  it('keeps an image reference in the partial the continue path re-attaches', async () => {
+  it('keeps an image reference in the reply a continue goes on with', async () => {
     const cookie = await signUp('asset-continue@example.com');
     const { chatId, state } = await setupChat(cookie);
     const { app: capturing, prompts } = capturingApp();
 
     // An assistant message is edited in place, so the reference really is in the
-    // stored text the continue path re-attaches after everything the preset sends.
+    // stored text the continue goes on with, the chat's newest turn.
     const opening = state.path.at(-1);
     expect((await json(cookie, `/api/messages/${opening.id}`, 'PATCH', { content: '문이 열린다 {{img::smile}}' })).status).toBe(200);
 
     const events = await readSse(await json(cookie, `/api/chats/${chatId}/continue`, 'POST', undefined, capturing));
     expect(events.at(-1)!.event).toBe('done');
 
-    // That partial bypasses the assembler and reaches the model as stored, like every other turn.
+    // It reaches the model as stored, like every other turn: RisuAI's newest turn of the chat.
     const sent = prompts.at(-1)!;
-    expect(sent.messages.at(-1)!.role).toBe('assistant');
-    expect(sent.messages.at(-1)!.content).toBe('문이 열린다 {{img::smile}}');
+    expect(sent.messages.at(-2)!.role).toBe('assistant');
+    expect(sent.messages.at(-2)!.content).toBe('문이 열린다 {{img::smile}}');
+    expect(sent.messages.at(-1)).toEqual({ role: 'system', content: SPEECH_PROTOCOL_REMINDER });
 
     // The stored message keeps the reference; the continuation appends to it.
     const after = await readJson(await request(cookie, `/api/chats/${chatId}`));
@@ -11019,13 +11154,12 @@ describe('prompt host data', () => {
     );
     // Under a template — the built-in OAI2 preset — the turns RisuAI's `lastChat`
     // sends around the newest one go nowhere; the one after everything goes,
-    // before the preset's jailbreak.
+    // last while the preset's jailbreak waits for its toggle.
     const sent = turns.at(-1)!;
     const texts = sent.map((turn) => turn.text);
     expect(texts).not.toContain('S-INJ');
     expect(texts).not.toContain('E-INJ');
-    expect(sent.at(-2)).toEqual({ role: 'system', text: 'P-INJ' });
-    expect(sent.at(-1)).toEqual({ role: 'system', text: OAI_JAILBREAK });
+    expect(sent.at(-1)).toEqual({ role: 'system', text: 'P-INJ' });
 
     // Never stored: the next request without any is a prompt without them.
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, app));
@@ -11284,7 +11418,7 @@ describe('prompt scripts and SillyTavern lore', () => {
     const texts = turns.at(-1)!.map((turn) => turn.text);
     expect(texts).not.toContain('AN-LORE');
     expect(texts).toContain(`${NEW_CHAT_SEPARATOR}\nEX-LORE`);
-    expect(texts.slice(texts.lastIndexOf('안녕'))).toEqual(['안녕', SPEECH_PROTOCOL_REMINDER, 'FREE-KEY', OAI_JAILBREAK]);
+    expect(texts.slice(texts.lastIndexOf('안녕'))).toEqual(['안녕', SPEECH_PROTOCOL_REMINDER, 'FREE-KEY']);
   });
 
   it("keeps SillyTavern's entry and book settings through a save, and runs the book as ST's", async () => {
@@ -11550,11 +11684,11 @@ describe('SillyTavern regex on the stored text and on World Info', () => {
       ['아리아의 다른 인사', null],
     ]);
 
-    // A work SillyTavern did not write keeps the greeting as it always did: the work's name for {{char}}.
+    // A work SillyTavern did not write reads {{char}} in its greeting as RisuAI does: its one member.
     const risu = await createPlot(cookie, { name: '리스 작품', intros: ['{{char}}의 인사'] });
     await addCharacter(cookie, risu.id, { name: '아리아', card: { description: '설명' } });
     const native = await startChat(cookie, risu.id);
-    expect(native.path[0].content).toBe('리스 작품의 인사');
+    expect(native.path[0].content).toBe('아리아의 인사');
 
     // The scene editor stores what it changed as an edit of each message is
     // stored, and leaves what it did not change as it was.
@@ -11591,8 +11725,8 @@ describe('SillyTavern regex on the stored text and on World Info', () => {
     let state = await readJson(await request(cookie, `/api/chats/${chatId}`));
     const [, user, reply] = state.path;
     expect([user.content, user.bias, user.hiddenFromPrompt]).toEqual(['안녕 유저', ' 그녀는 웃으며', false]);
-    // After everything else, the preset's jailbreak included: ST adds it last.
-    expect(turns[0]!.slice(-3)).toEqual([OAI_JAILBREAK, TAVERN_BIAS_NUDGE, '그녀는 웃으며']);
+    // After everything else: ST adds it last.
+    expect(turns[0]!.slice(-3)).toEqual([SPEECH_PROTOCOL_REMINDER, TAVERN_BIAS_NUDGE, '그녀는 웃으며']);
     expect(turns[0]).toContain('안녕 유저');
     // The model said the bias again: it comes off, as ST's reply never holds it.
     expect(reply.content).toBe(' 고개를 끄덕였다.');
@@ -11630,8 +11764,8 @@ describe('SillyTavern regex on the stored text and on World Info', () => {
     const { app, turns } = repliesApp(['답']);
     await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '{{char}}에게 {{setvar::mood::좋음}}' }, app));
     expect((await pathTexts(cookie, chatId))[1]).toBe('{{char}}에게 {{setvar::mood::좋음}}');
-    // Read when the prompt is built, as RisuAI reads a turn's.
-    expect(turns[0]!.join('\n')).toContain('리스 작품에게');
+    // Read when the prompt is built, as RisuAI reads a turn's: {{char}} its one member.
+    expect(turns[0]!.join('\n')).toContain('아리아에게');
   });
 
   it('stores a turn written as the narrator as ST’s narrator message: its macros, none of the reader’s scripts, and edits it on the narrator’s side', async () => {
@@ -11755,7 +11889,7 @@ describe('request triggers', () => {
     expect(plain.event).toBe('done');
     const sent = prompts.at(-1)!;
     expect(sent.system).toBe(`새 시스템 유저 안녕`);
-    expect(sent.messages.at(-1)!.content).toBe(OAI_JAILBREAK);
+    expect(sent.messages.at(-1)!.content).toBe(SPEECH_PROTOCOL_REMINDER);
     expect(sent.messages.filter((message) => message.role === 'user').map((message) => message.content)).toEqual([
       '바뀐 인사',
     ]);
@@ -11939,7 +12073,6 @@ describe('request triggers', () => {
       { kind: 'history', label: 'assistant', text: '문 앞이다.' },
       { kind: 'request', label: 'system', text: '안녕' },
       { kind: 'speech_protocol', label: undefined, text: SPEECH_PROTOCOL_REMINDER },
-      { kind: 'preset', label: undefined, text: OAI_JAILBREAK },
     ]);
   });
 });
@@ -12177,7 +12310,12 @@ describe('editRequest listeners', () => {
         adapter: {
           stream: (req) => {
             models += 1;
-            prompts.push({ system: req.system, messages: req.messages, maxTokens: req.maxTokens });
+            prompts.push({
+            system: req.system,
+            messages: req.messages,
+            maxTokens: req.maxTokens,
+            ...(req.systemCachePoint ? { systemCachePoint: true } : {}),
+          });
             return echo.stream(req);
           },
         },
@@ -12238,7 +12376,7 @@ describe('editRequest listeners', () => {
       const events = await readSse(await json(cookie, `/api/chats/${chatId}/${path}`, 'POST', body, capturing));
       expect(events.at(-1)!.event, path).toBe('done');
       expect(prompts.at(-1)!.system, path).toMatch(/^루아 \d$/);
-      expect(prompts.at(-1)!.messages.filter((m) => m.content === OAI_JAILBREAK)).toHaveLength(1);
+      expect(prompts.at(-1)!.messages.filter((m) => m.content === SPEECH_PROTOCOL_REMINDER)).toHaveLength(1);
     }
     const report = await readJson(await request(cookie, `/api/chats/${chatId}/inspect`));
     expect(report.blocks[0]).toMatchObject({ kind: 'request', label: 'system' });
@@ -12371,8 +12509,7 @@ describe('editRequest listeners', () => {
       'assistant|nil|true|nil|nil|nil|nil|nil|',
       // Under a template — the built-in OAI2 — the newest turn stays among the chat's: removable like the rest.
       `user|${first.id}|true|0|0|nil|nil|nil|`,
-      // What follows the chat: the protocol's reminder, then the preset's jailbreak.
-      'system|nil|nil|nil|nil|nil|nil|nil|',
+      // What follows the chat: the protocol's reminder; the preset's jailbreak waits for its toggle.
       'system|nil|nil|nil|nil|nil|nil|nil|',
     ]);
 
@@ -12394,7 +12531,6 @@ describe('editRequest listeners', () => {
       ...examples,
       `assistant|${reply.id}|true|0|0|nil|nil|nil|`,
       `user|${second.id}|true|0|0|nil|nil|nil|`,
-      'system|nil|nil|nil|nil|nil|nil|nil|',
       'system|nil|nil|nil|nil|nil|nil|nil|',
     ]);
     // The listener changed the request, so it went in that shape: the summary a system turn of its own.
@@ -12451,10 +12587,16 @@ describe('editRequest listeners', () => {
     await send(cookie, chatId, capturing);
     const unedited = prompts.at(-1)!;
     const texts = unedited.messages.map((message) => contentText(message.content));
-    // The assembler's own: one system turn for the example block, under RisuAI's
-    // separator, and the separator before the chat as a turn of its own.
-    expect(texts.filter((text) => text.startsWith(`${NEW_CHAT_SEPARATOR}\n`))).toEqual([`${NEW_CHAT_SEPARATOR}\n유저: 예시 질문\n아리아: 예시 답변`]);
-    expect(texts.filter((text) => text === NEW_CHAT_SEPARATOR)).toHaveLength(1);
+    // The assembler's own: RisuAI's turns for the example block, and the separator
+    // before the chat as a turn of its own.
+    expect(unedited.messages.slice(0, 5)).toEqual([
+      { role: 'system', content: '[Start a new chat]' },
+      { role: 'user', content: '예시 질문' },
+      { role: 'assistant', content: '예시 답변' },
+      { role: 'system', content: '[Start a new chat]' },
+      { role: 'assistant', content: '문 앞이다.' },
+    ]);
+    expect(texts.filter((text) => text === NEW_CHAT_SEPARATOR)).toHaveLength(2);
 
     await send(cookie, chatId, capturing, '바꿔');
     const sent = prompts.at(-1)!;
@@ -12467,8 +12609,8 @@ describe('editRequest listeners', () => {
       { role: 'system', content: '[Start a new chat]' },
       { role: 'assistant', content: '문 앞이다.' },
     ]);
-    // The last item is the preset's jailbreak, which the listener wrote on.
-    expect(sent.messages.at(-1)).toEqual({ role: 'system', content: `${OAI_JAILBREAK} (끝)` });
+    // The last item is the protocol's reminder, which the listener wrote on.
+    expect(sent.messages.at(-1)).toEqual({ role: 'system', content: `${SPEECH_PROTOCOL_REMINDER} (끝)` });
   });
 
   it('sends the pictures a listener leaves on the reader’s turn — after it drops other turns too — and none it removed', async () => {
@@ -13204,8 +13346,8 @@ describe('the browser script runtime', () => {
     expect(turns.at(-1)).toContain('둘째 인사다.');
     expect(turns.at(-1)).not.toContain('세라가 다시 문을 연다.');
 
-    // A card with a nickname keeps it as `{{char}}` in its own text through a rename; the
-    // work's text reads the work's name, which the rename gave it.
+    // A card with a nickname keeps it as `{{char}}` through a rename, in every text, as
+    // RisuAI's `{{char}}` reads the nickname first.
     const renamed = (await readPlot(owner, plot.id)).characters[0];
     await patchCharacter(owner, plot.id, member.id, { card: { ...renamed.card, nickname: '리리' } });
     expect((await scriptsOf(reader, onFirst.chat.id)).scripts).toMatchObject({
@@ -13213,7 +13355,7 @@ describe('the browser script runtime', () => {
       character: { name: '세라', nickname: '리리' },
     });
     await readSse(await json(reader, `/api/chats/${onFirst.chat.id}/regenerate`, 'POST', {}, app));
-    expect(systems.at(-1)).toContain(`[Roleplay Setting]\n리리는 사서다.\n\n${scenarioLine('세라의 겨울.')}\n`);
+    expect(systems.at(-1)).toContain(`[Roleplay Setting]\n리리는 사서다.\n\n${scenarioLine('리리의 겨울.')}\n`);
     expect(systems.at(-1)).toContain(speechProtocol(['세라']));
   });
 
@@ -13746,10 +13888,10 @@ describe('group turns', () => {
     expect(a.groupTurnId).toBe(a.messageId);
     const b = await done(await post(cookie, chatId, 'reply', { speakerId: kai, groupTurnId: a.groupTurnId }, target));
     expect(b).toMatchObject({ speakerMemberId: kai, groupTurnId: a.messageId });
-    // Both under the built-in preset, its jailbreak and all.
+    // Both under the built-in preset; its jailbreak waits for the toggle.
     for (const request of sent) {
       expect(request.system.startsWith(OAI2_MAIN_SENT)).toBe(true);
-      expect(request.messages.map((message) => message.content)).toContain(OAI_JAILBREAK);
+      expect(request.messages.map((message) => message.content)).not.toContain(OAI_JAILBREAK);
     }
 
     const [greeting, user, first, second] = await rowsOf(chatId);
@@ -13759,18 +13901,18 @@ describe('group turns', () => {
     expect(first!.content).toBe('*검을 거둔다* 왔군.\n앉아.');
     expect(second).toMatchObject({ parentId: first!.id, speakerMemberId: kai, groupTurnId: a.messageId, content: '어서 와!' });
 
-    // Each request is the speaker's: its line closes what follows the chat, before
-    // the preset's jailbreak, and the others' names stop it.
+    // Each request is the speaker's: its line closes what follows the chat, and the
+    // others' names stop it.
     expect(sent[0]!.stop).toEqual(['\n카이:', '\n미오:']);
     const firstTexts = textsOf(sent[0]!);
-    expect(firstTexts.slice(-3, -1)).toEqual([groupSpeakerLine('세이야'), OAI_JAILBREAK]);
+    expect(firstTexts.at(-2)).toBe(groupSpeakerLine('세이야'));
     // Not the round's last: the status window is the last speaker's to write — the request's last word.
     expect(firstTexts.at(-1)).toContain('Do not add the status window or the choices to this reply.');
     // The line the reader wrote as 카이 is sent as 카이's.
     expect(firstTexts).toContain('안녕.\n카이: 대신 인사할게.');
     const secondTexts = textsOf(sent[1]!);
     expect(sent[1]!.stop).toEqual(['\n세이야:', '\n세이:', '\n미오:']);
-    expect(secondTexts.slice(-2)).toEqual([groupSpeakerLine('카이'), OAI_JAILBREAK]);
+    expect(secondTexts.at(-1)).toBe(groupSpeakerLine('카이'));
     // Another member's reply goes in the preset's group template, as the reader's side (RisuAI's `groupOtherBotRole`).
     expect(sent[1]!.messages).toContainEqual({ role: 'user', content: "<세이야's Message>\n*검을 거둔다* 왔군.\n앉아.\n</세이야's Message>" });
     expect(secondTexts.join('\n')).not.toContain('Do not add the status window or the choices to this reply.');
@@ -13798,14 +13940,13 @@ describe('group turns', () => {
     const recalledAt = (req: ChatRequest) => textsOf(req).findIndex((text) => text === 'KEYED ON');
     const newestBefore = (req: ChatRequest, at: number) => req.messages.slice(0, at).findLastIndex((message) => message.role !== 'system');
     // Each follows the newest turn sent: the reader's for the first speaker, the first reply for
-    // the next, the reply before the one continued for the continue — whose partial alone comes
-    // after the system turns.
+    // the next, and for the continue the reply it goes on with, the chat's newest turn, as RisuAI's.
     sent.forEach((req, index) => {
       const at = recalledAt(req);
       expect(at, `request ${index}`).toBeGreaterThan(0);
       expect(newestBefore(req, at), `request ${index}`).toBe(at - 1);
       expect(req.messages.slice(at).filter((message) => message.role !== 'system').map((message) => message.role), `request ${index}`).toEqual(
-        index === 2 ? ['assistant'] : [],
+        [],
       );
     });
     expect(textsOf(sent[0]!)[recalledAt(sent[0]!) - 1]).toBe('안녕');
@@ -13958,10 +14099,10 @@ describe('group turns', () => {
     const { b } = await firstRound(chat, target);
     const more = await done(await post(cookie, chatId, 'continue', {}, target));
     expect(more).toMatchObject({ messageId: b.messageId, speakerMemberId: kai, groupTurnId: b.groupTurnId });
+    // RisuAI goes on with the reply its chat ends on, the speaker's own, plain, as the chat's newest turn.
     const texts = textsOf(sent.at(-1)!);
-    expect(texts.at(-1)).toBe('어서 와!');
-    expect(texts.at(-3)).toBe(groupSpeakerLine('카이'));
-    expect(texts.at(-2)).toBe(OAI_JAILBREAK);
+    expect(texts.at(-1)).toBe(groupSpeakerLine('카이'));
+    expect(sent.at(-1)!.messages.findLast((message) => message.role !== 'system')).toEqual({ role: 'assistant', content: '어서 와!' });
     expect(sent.at(-1)!.stop).toEqual(['\n세이야:', '\n세이:', '\n미오:']);
     expect((await rowsOf(chatId)).find((row) => row.id === b.messageId)!.content).toBe('어서 와!더 마셔.');
   });
@@ -14630,8 +14771,8 @@ describe('emotion images', () => {
 
     const done = await send(cookie, chatId, { content: '그래. <Emotion="happy">' }, harness.app);
     const prompt = harness.prompts.at(-1)!;
-    // RisuAI's instructions close the card prompt, before the service's final note.
-    const last = prompt.messages.at(-2)!;
+    // RisuAI's instructions close the card prompt.
+    const last = prompt.messages.at(-1)!;
     expect(last.role).toBe('system');
     expect(contentText(last.content)).toBe(
       "You must always output the character's emotional image as a command at the end of a conversation. The command must be selected from a given list, and it's better to have variety than to repeat images used in previous chats. Use one image, depending on the character's emotion. See the list below. Form: <Emotion=\"<image command>\"> Example: <Emotion=\"Agree\"> List of commands: neutral, happy, Angry",
@@ -14654,7 +14795,7 @@ describe('emotion images', () => {
     );
     const ownChat = await startChat(cookie, own.id);
     await send(cookie, ownChat.chat.id, { content: '좋아' }, harness.app);
-    expect(contentText(harness.prompts.at(-1)!.messages.at(-2)!.content)).toBe('표정: neutral, happy, Angry');
+    expect(contentText(harness.prompts.at(-1)!.messages.at(-1)!.content)).toBe('표정: neutral, happy, Angry');
   });
 
   it("keeps the picture a card's @@emo named at the commit, and chooses none over it", async () => {
@@ -14813,7 +14954,8 @@ describe('RisuAI modules', () => {
     const chatId = (await startChat(cookie, plot.id)).chat.id;
     expect((await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing))).at(-1)!.event).toBe('done');
     const sent = prompts.at(-1)!;
-    expect(sent.system.indexOf('아리아의 로어')).toBeLessThan(sent.system.indexOf('골짜기에는 늘 비가 온다.'));
+    // After the card's in RisuAI's book, and so — of one insertion order — sent before it, as its sort-then-reverse leaves them.
+    expect(sent.system.indexOf('골짜기에는 늘 비가 온다.')).toBeLessThan(sent.system.indexOf('아리아의 로어'));
     // The module's `editprocess` rewrote the greeting as it is sent; the stored one is as it was.
     expect(JSON.stringify(sent.messages)).toContain('오늘은 흐림.');
 
@@ -14831,7 +14973,8 @@ describe('RisuAI modules', () => {
 
     // The inspector says where the lore came from.
     const report = await readJson(await request(cookie, `/api/chats/${chatId}/inspect`, 'GET', undefined, capturing));
-    expect(report.lore.map((entry: any) => entry.source)).toEqual(['아리아', '날씨 모듈']);
+    // Of one insertion order, the module's — after the card's in RisuAI's book — goes first.
+    expect(report.lore.map((entry: any) => entry.source)).toEqual(['날씨 모듈', '아리아']);
   });
 
   it('answers {{moduleenabled}} and {{moduleassetlist}} by namespace, in the prompt and on the reader’s screen', async () => {
@@ -15122,7 +15265,8 @@ describe('reader modules', () => {
     expect((await readSse(await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, capturing))).at(-1)!.event).toBe('done');
     const sent = prompts.at(-1)!;
     expect(sent.system).toContain('골짜기 1');
-    expect(sent.system.indexOf('등불이 흔들린다.')).toBeLessThan(sent.system.indexOf('창밖에 빗소리가 들린다.'));
+    // Of one insertion order: in the reverse of the book's, as RisuAI sends them.
+    expect(sent.system.indexOf('창밖에 빗소리가 들린다.')).toBeLessThan(sent.system.indexOf('등불이 흔들린다.'));
     // RisuAI's one list, sorted by `<order N>`: the reader's module (5) before the work's (0) — `눈` became
     // `진눈깨비` first, and the work's `눈` → `눈보라` then ran inside it (the other way round is `진눈깨비보라`).
     expect(JSON.stringify(sent.messages)).toContain('진눈보라깨비이 온다.');
@@ -15357,7 +15501,7 @@ async function englishChat(cookie: string): Promise<{ plotId: string; chatId: st
 }
 
 describe('language modes', () => {
-  it("asks for the reader language last, after the card post-history and the preset's jailbreak", async () => {
+  it('asks for the reader language last, after the card post-history and what follows the chat', async () => {
     const cookie = await signUp('language-instruct@example.com');
     const { chatId } = await englishChat(cookie);
     const { app: capturing, prompts } = capturingApp();
@@ -15367,7 +15511,7 @@ describe('language modes', () => {
     expect(prompts).toHaveLength(1);
     const sent = prompts[0]!.messages.map((message) => [message.role, contentText(message.content)]);
     expect(sent.slice(-2)).toEqual([
-      ['system', OAI_JAILBREAK],
+      ['system', SPEECH_PROTOCOL_REMINDER],
       ['system', replyLanguageInstruction('ko')],
     ]);
     // The card's post-history instructions are OAI2's global note, in the system string ahead of the chat.
@@ -15561,12 +15705,11 @@ describe('author note settings', () => {
     const at = noteOf();
     expect(at).toBeGreaterThan(-1);
     expect(prompts.at(-1)!.system).not.toContain('NOTE-TEXT');
-    // Depth 0: after the newest turn, with what follows the chat — before the preset's jailbreak.
+    // Depth 0: after the newest turn, with what follows the chat.
     expect(sent.slice(at - 2).map((message) => [message.role, contentText(message.content)])).toEqual([
       ['user', '둘째 턴'],
       ['system', SPEECH_PROTOCOL_REMINDER],
       ['user', 'NOTE-TEXT'],
-      ['system', OAI_JAILBREAK],
     ]);
     // A regenerate answers the same turn: two of the reader's turns still.
     await readSse(await json(cookie, `/api/chats/${chatId}/regenerate`, 'POST', undefined, capturing));

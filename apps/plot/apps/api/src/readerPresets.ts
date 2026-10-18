@@ -49,6 +49,8 @@ export async function loadReaderPreset(deps: AppDeps, chat: Chat): Promise<Promp
       promptTemplate: readerPresets.promptTemplate,
       groupTemplate: readerPresets.groupTemplate,
       groupOtherBotRole: readerPresets.groupOtherBotRole,
+      promptSettings: readerPresets.promptSettings,
+      regex: readerPresets.regex,
     })
     .from(readerPresets)
     .where(and(eq(readerPresets.id, chat.readerPresetId), eq(readerPresets.userId, chat.userId)))

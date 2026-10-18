@@ -29,6 +29,7 @@ import type {
   PlotTense,
   PromptBlockKind,
   PromptReport,
+  PromptSettings,
   PromptTemplateItem,
   StorytellingStyle,
   VariableDelta,
@@ -621,6 +622,8 @@ export interface ChatModulesView {
   toggles: string;
   /** RisuAI's `HideIconStore`: the chat draws no message's sender picture or name. Optional for a hand-built view. */
   hideIcons?: boolean;
+  /** The chat's preset has a jailbreak, so its settings draw RisuAI's jailbreak toggle. Optional for a hand-built view. */
+  jailbreak?: boolean;
 }
 
 /**
@@ -648,6 +651,10 @@ export interface ReaderPreset {
   moduleIntegration: string;
   /** RisuAI's `templateDefaultVariables`: `key=value` lines a chat on it reads for a variable nothing set. */
   defaultVariables: string;
+  /** RisuAI's `promptSettings`; null for every one off. No control edits them: an import brings them. */
+  promptSettings: PromptSettings | null;
+  /** RisuAI's preset regex, run ahead of the card's scripts on what is sent. No control edits it either. */
+  regex: Record<string, unknown>[];
   createdAt: string;
   updatedAt: string;
 }

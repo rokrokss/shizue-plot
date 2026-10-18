@@ -9,6 +9,7 @@ import {
   emotionScreenOf,
   inlayEmotionTags,
   isNarration,
+  jailbreakToggled,
   replyLanguageInstruction,
   replyLengthTokens,
   rewriteTavernLore,
@@ -94,6 +95,7 @@ import {
   type PromptInjections,
 } from './scriptState.js';
 import { scheduleMessageEmbedding, searchByMeaning, type VectorPlan } from './vectors.js';
+import { assetPromptImages, modelKindOf, withAdditionalText } from './risuPrompt.js';
 
 /**
  * The fire-and-forget jobs a completed assistant turn starts. They own separate
@@ -741,14 +743,17 @@ async function assembleRequest(
   deps: AppDeps,
   report = false,
 ): Promise<AssembledPrompt> {
-  // For continue the trailing assistant text must be the last turn so the model
-  // resumes it, so it is re-attached after the post-history instructions.
+  // RisuAI continues the reply its chat ends on as the chat's newest turn, and
+  // tells the models it tells (`modelKind`) to go on with it after everything.
+  // SillyTavern sends it last instead, as its prefill: a work ST wrote keeps
+  // that, the partial re-attached after the post-history instructions.
   const isContinue = plan.target.kind === 'continue';
+  const tavernContinue = isContinue && plan.characters[0]?.sillyTavern === true;
   // The partial bypasses the assembler, so it drops its own inlays as every other
   // turn does — and one a script wrote as its character, or another member's
   // group reply, goes under its name, as it would there. A speaker continuing
   // their own reply reads it plain.
-  const last = isContinue ? plan.history[plan.history.length - 1] : undefined;
+  const last = tavernContinue ? plan.history[plan.history.length - 1] : undefined;
   const tagged = last?.speakerId !== undefined ? plan.characters.find((member) => member.id === last.speakerId) : undefined;
   const own = tagged !== undefined && typeof plan.speaker === 'number' && plan.characters[plan.speaker] === tagged;
   const partialBy = tagged ? (own ? undefined : tagged.name) : last?.speaker;
@@ -762,7 +767,7 @@ async function assembleRequest(
   // The reasoning SillyTavern kept on the message goes ahead of it, in ST's
   // default template — the one message ST sends its reasoning with by default,
   // as the prefix of the text it continues (`PromptReasoning.addToMessage`).
-  const reasoning = isContinue ? plan.target.kind === 'continue' && plan.target.message.reasoning : null;
+  const reasoning = tavernContinue ? plan.target.kind === 'continue' && plan.target.message.reasoning : null;
   // SillyTavern sends a reply's bias as the prompt's last message, the
   // assistant's (`openai.js`, after everything else): the turn the model goes on
   // from, as a continue's partial is.
@@ -772,7 +777,7 @@ async function assembleRequest(
     : resumed || bias.trim();
   // The partial is not in the history the assembler reads, so not on its branch
   // either — and where the partial is the greeting itself, there is none apart.
-  const branch: PromptBranch = !isContinue
+  const branch: PromptBranch = !tavernContinue
     ? plan.branch
     : plan.branch.length <= 1
       ? { length: 0 }
@@ -793,9 +798,21 @@ async function assembleRequest(
   // The scripts read the turns as stored, before an image note is added to them —
   // the greeting as this request's scripts left it, which is what the assembler sends.
   const history = withoutUnseeableImages(
-    await withPromptScripts(withBranchGreeting(isContinue ? plan.history.slice(0, -1) : plan.history, branch), plan, branch),
+    await withPromptScripts(withBranchGreeting(tavernContinue ? plan.history.slice(0, -1) : plan.history, branch), plan, branch),
     plan.main.vision,
   );
+  // RisuAI's `{{asset_prompt::name}}` pictures, for a model that takes them, and
+  // its Additional Text for the character the request is for.
+  const speakerMember = typeof plan.speaker === 'number' ? plan.characters[plan.speaker] : plan.characters.length === 1 ? plan.characters[0] : undefined;
+  const plotId = plan.vectors?.plotId;
+  const assetPrompts = plan.main.vision && plotId ? await assetPromptImages(deps, plotId, history, speakerMember) : undefined;
+  const opening = plan.branch.greeting ? plan.wholeBranch.slice(1) : plan.wholeBranch;
+  const roster = await withAdditionalText(deps, withChatLore(plan.characters, plan.localLore, plan.plot.modules), {
+    speaker: plan.speaker,
+    messages: opening.filter((message) => !message.hiddenFromPrompt),
+    userName: plan.userName,
+    plotLanguage: plan.vectors?.plotLanguage,
+  });
   // The mode's own nudge first, then the bias's: one closing instruction rather
   // than two system turns in a row.
   const trailingSystem = [
@@ -813,7 +830,7 @@ async function assembleRequest(
   const marksLore = worldInfoScriptsOf(cardsOf(plan)).length > 0;
   const assembled = assemblePrompt({
     plot: plan.plot,
-    characters: withChatLore(plan.characters, plan.localLore, plan.plot.modules),
+    characters: roster,
     personaText: plan.personaText,
     userName: plan.userName,
     memoryText: plan.memoryText,
@@ -855,6 +872,11 @@ async function assembleRequest(
     contextBudget: plan.contextBudget - countTokens(partial) - countTokens(trailingSystem) - countTokens(languageLine),
     report,
     ...(marksLore ? { markTavernLore: true } : {}),
+    // RisuAI's jailbreak toggle, its checks on the model, the continue it tells.
+    jailbreak: jailbreakToggled(plan.globalVariables),
+    ...(modelKindOf(plan.main.preset.format) ? { modelKind: modelKindOf(plan.main.preset.format)! } : {}),
+    ...(isContinue && !tavernContinue ? { continuing: true } : {}),
+    ...(assetPrompts && assetPrompts.size > 0 ? { assetPrompts } : {}),
   });
   const prompt = await withWorldInfoScripts(assembled, plan);
   if (!partial && !trailingSystem && !languageLine) return prompt;
@@ -886,6 +908,7 @@ async function assembleRequest(
     ],
     ...(prompt.risu ? { risu: prompt.risu } : {}),
     ...(prompt.systemSections ? { systemSections: prompt.systemSections } : {}),
+    ...(prompt.systemCachePoint ? { systemCachePoint: prompt.systemCachePoint } : {}),
     ...(prompt.fixedTokens !== undefined ? { fixedTokens: prompt.fixedTokens } : {}),
     loreTriggers: prompt.loreTriggers,
     ...(prompt.variableWrites ? { variableWrites: prompt.variableWrites } : {}),
@@ -1033,6 +1056,8 @@ async function runGeneration(
         const generator = resolved.adapter.stream({
           model: resolved.providerModel,
           system: request.system,
+          // The template's `cache` item marked the system (RisuAI's `cachePoint`).
+          ...(request.systemCachePoint ? { systemCachePoint: true } : {}),
           messages: request.messages,
           // The cap the prompt's budget reserved; ChatGPT sharing takes none and
           // reads the prompt's length directive instead. The preset's values ride

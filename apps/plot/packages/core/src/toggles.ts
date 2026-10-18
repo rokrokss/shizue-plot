@@ -101,6 +101,40 @@ export const isEmptyGroup = (entry: ToggleEntry): boolean => isToggleGroup(entry
 export const toggleVariable = (key: string): string => `toggle_${key}`;
 
 /**
+ * Where RisuAI's jailbreak toggle (`db.jailbreakToggle`, which its toggles
+ * sidebar draws above the toggles) is kept here: a global variable of the work,
+ * as the toggles are — RisuAI's are its install's, and so is that one — `'1'`
+ * while on. Unset is off, as on a fresh RisuAI install. No toggle key can name
+ * it: those are all `toggle_…`.
+ */
+export const JAILBREAK_TOGGLE_VARIABLE = '__jailbreak_toggle';
+
+/** Whether a chat's globals have the jailbreak toggle on (`JAILBREAK_TOGGLE_VARIABLE`). */
+export const jailbreakToggled = (globals: Readonly<Record<string, string>> | undefined): boolean =>
+  globals?.[JAILBREAK_TOGGLE_VARIABLE] === '1';
+
+/** What `presetHasJailbreak` reads of a preset: its jailbreak text and its template's items. */
+interface JailbreakPreset {
+  jailbreak: string;
+  promptTemplate: readonly { type: string; text?: string; innerFormat?: string; defaultText?: string }[] | null;
+}
+
+/**
+ * Whether RisuAI's sidebar draws its jailbreak toggle for a preset
+ * (`hasJailbreakPrompt` in `Toggles.svelte`): without a template, when its
+ * jailbreak text says anything; with one, when an item is a jailbreak or a text
+ * of one reads `{{jbtoggled}}`.
+ */
+export function presetHasJailbreak(preset: JailbreakPreset): boolean {
+  if (!preset.promptTemplate) return preset.jailbreak.trim().length > 0;
+  return preset.promptTemplate.some(
+    (item) =>
+      item.type === 'jailbreak' ||
+      [item.text, item.innerFormat, item.defaultText].some((text) => text?.includes('{{jbtoggled}}') ?? false),
+  );
+}
+
+/**
  * The toggle text RisuAI's sidebar draws for a chat (`Toggles.svelte`): the
  * prompt preset's own (`customPromptTemplateToggle` — here the chat's reader
  * preset's), then the modules' toggles, each on its own lines in the modules'

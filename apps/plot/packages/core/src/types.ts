@@ -65,12 +65,21 @@ export interface LoreEntry {
    */
   positioned?: true;
   /**
-   * V3 `@@depth N`: inject the entry into the history, N messages from the end,
-   * instead of into the system block. Undefined for system-block entries.
+   * Inject the entry into the history instead of into the system block: N
+   * messages from the end (SillyTavern's at-depth, `@@reverse_depth N`), or —
+   * where `risu.depthFrom` is `start` — N places from the start of RisuAI's chat
+   * block (`@@depth N`, as RisuAI's `sendChat` splices it). 0 goes after
+   * everything. Undefined for system-block entries.
    */
   depth?: number;
-  /** V3 `@@role`: role of the injected message. Only set together with depth. */
+  /**
+   * The role the entry is sent as. SillyTavern's only goes with a depth; a
+   * RisuAI `@@role` holds wherever the entry goes — its lorebook slot, around
+   * the description, at a depth.
+   */
   role?: LoreRole;
+  /** What RisuAI's own decorators asked of the entry beyond the fields above (`RisuLoreOptions`). */
+  risu?: RisuLoreOptions;
   /**
    * How `secondaryKeys` combine with the primary match when `selective` is on.
    * Absent means `and_any`.
@@ -173,6 +182,42 @@ export interface LoreEntry {
   vectorized?: true;
 }
 
+/**
+ * RisuAI's decorators that have no field of their own (`loadLoreBookV3Prompt`
+ * in its `lorebook.svelte.ts`), read off the entry's content at import.
+ */
+export interface RisuLoreOptions {
+  /** Where `depth` counts from: `@@depth N` from the start of RisuAI's chat block, `@@reverse_depth N` from its end. */
+  depthFrom?: 'start' | 'end';
+  /** `@@position pt_<name>`: sent nowhere but where a text asks for it with `{{position::<name>}}`. */
+  slot?: string;
+  /** `@@activate_only_every N`: only while the chat's length is a multiple of N. */
+  every?: number;
+  /** `@@is_greeting N`: only on a branch that opened on that greeting — 0 the first, 1 the first alternate. */
+  greeting?: number;
+  /** `@@priority N` — or `@@ignore_on_max_context`, -1000 — the order the budget pays in, in place of `insertionOrder`. */
+  priority?: number;
+  /** `@@recursive`: what the entry says is scanned again even where the book does not recurse. */
+  recursive?: true;
+  /** `@@match_full_word` (true) or `@@match_partial_word` (false), over the book's setting. */
+  fullWord?: boolean;
+  /**
+   * `@@inject_lore`, `@@inject_at`, `@@inject_replace`, `@@inject_prepend`: the
+   * entry goes into another text instead of its own place — an active entry
+   * named `location` (`lore`), or a template item of that type — appended,
+   * prepended, or in place of `param`.
+   */
+  inject?: RisuLoreInjection;
+}
+
+/** `RisuLoreOptions.inject`. */
+export interface RisuLoreInjection {
+  operation: 'append' | 'prepend' | 'replace';
+  location: string;
+  param: string;
+  lore: boolean;
+}
+
 /** SillyTavern's selective logic, in its own terms. */
 export type LoreSelectiveLogic = 'and_any' | 'and_all' | 'not_any' | 'not_all';
 
@@ -253,6 +298,11 @@ export interface LoreSettings {
    * Regex keys are not touched.
    */
   risuMatching?: boolean;
+  /**
+   * RisuAI's `fullWordMatching` (the book's `risu_fullWordMatching`): a plain
+   * key matches only as one of the words a message splits into on spaces.
+   */
+  fullWordMatching?: boolean;
   /**
    * SillyTavern's global settings for the entries that leave them to the book
    * (`world_info_case_sensitive`, `world_info_match_whole_words`,
@@ -823,3 +873,9 @@ export const DEFAULT_LORE_SETTINGS: LoreSettings = {
   scanDepth: 4,
   recursiveScanning: false,
 };
+
+/**
+ * RisuAI's lorebook depth where a card does not set its book's three settings
+ * together (`db.loreBookDepth`, 5 on every install): what a RisuAI book scans.
+ */
+export const RISU_DEFAULT_SCAN_DEPTH = 5;

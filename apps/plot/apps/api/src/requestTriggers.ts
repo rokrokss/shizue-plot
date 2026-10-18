@@ -26,7 +26,8 @@
  * picture's data URL, as RisuAI's are — unless a request's pictures come to
  * more than `REQUEST_IMAGE_BUDGET`, when each is a stand-in that names it
  * (`image:0`, …) for that request alone. `cachePoint` (Claude's prompt
- * caching) is never set.
+ * caching) is on the turns a prompt template's `cache` item marked; a request
+ * the editors changed goes without it.
  *
  * **What comes back.** RisuAI takes any array; this takes one whose every turn
  * has a role of `system`, `user` or `assistant` and string content, and sends
@@ -501,7 +502,7 @@ export async function withEditedRequest(
     };
   });
   if (refused > 0) console.warn(`[api] the request's scripts left ${refused} image(s) on an assistant turn; not sent:`, label);
-  const { sources: _stale, risu: _view, systemSections: _sections, ...rest } = prompt;
+  const { sources: _stale, risu: _view, systemSections: _sections, systemCachePoint: _cached, ...rest } = prompt;
   return {
     ...rest,
     system: system ?? '',

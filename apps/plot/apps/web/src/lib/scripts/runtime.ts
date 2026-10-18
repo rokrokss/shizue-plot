@@ -384,14 +384,26 @@ export async function activeLore(
   return {
     actives: active.map((entry) => ({
       depth: entry.depth ?? 0,
-      pos: '',
+      // RisuAI's one placement, as its decorators set it.
+      pos:
+        entry.depth !== undefined
+          ? entry.risu?.depthFrom === 'start'
+            ? 'depth'
+            : 'reverse_depth'
+          : entry.risu?.slot !== undefined
+            ? `pt_${entry.risu.slot}`
+            : entry.positioned
+              ? entry.position === 'before_char'
+                ? 'before_desc'
+                : 'after_desc'
+              : '',
       prompt: entry.content,
       role: entry.role ?? 'system',
       order: entry.insertionOrder,
       tokens: tokens(entry.content),
-      priority: entry.insertionOrder,
+      priority: entry.risu?.priority ?? entry.insertionOrder,
       source: entry.name || `lorebook ${entries.indexOf(entry)}`,
-      inject: null,
+      inject: entry.risu?.inject ?? null,
     })),
     matchLog: [],
   };

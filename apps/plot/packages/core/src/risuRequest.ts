@@ -40,8 +40,8 @@
 import {
   NEW_CHAT_SEPARATOR,
   promptText,
+  risuExampleSides,
   type AssembledPrompt,
-  type ExampleSpeakers,
   type MessageSource,
   type PromptBlockKind,
 } from './prompt.js';
@@ -146,62 +146,17 @@ export function risuRequestExtras(source: MessageSource | undefined): RisuReques
   const rule = RISU_REQUEST_ITEMS[source.kind];
   // RisuAI's greeting is the character's first message, not a chat message: removable, and nothing else.
   if (source.greeting) return rule.removable ? { removable: true } : {};
+  // An example block's turns: its separator `NewChatExample`, its lines named for their side.
+  if (source.kind === 'examples' && !source.speakers) {
+    if (source.name) return { name: source.name, removable: true };
+    return source.separator ? { memo: 'NewChatExample', removable: true } : { removable: true };
+  }
   const memo = rule.memo === 'chatId' ? source.id : rule.memo;
   return {
     ...(memo !== undefined ? { memo } : {}),
     ...(rule.removable ? { removable: true } : {}),
     ...(rule.chat ? { attr: [], thoughts: [] } : {}),
   };
-}
-
-/** One turn of an example block, as RisuAI's `exampleMessage` reads it. */
-export interface ExampleSide {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-}
-
-/** `line` past `prefix`, matched as RisuAI matches its speakers — case aside — or null. */
-const after = (line: string, prefix: string): string | null =>
-  line.slice(0, prefix.length).toLocaleLowerCase() === prefix.toLocaleLowerCase() ? line.slice(prefix.length) : null;
-
-/**
- * An example block's text — after its header line, as sent — as the turns
- * RisuAI's `exampleMessage` makes of a `<START>` block: a line that opens with
- * `{{char}}:`, `<bot>:` or a name of the character's is an assistant turn, one
- * that opens with `{{user}}:`, `<user>:` or the reader's name a user turn — the
- * macros are already expanded here, so the names are what they read as — and
- * every other line joins the turn before it, trimmed. Turns left empty are not
- * sent, as RisuAI skips them.
- *
- * Two things RisuAI does not: a speaker's line keeps everything after the
- * speaker (RisuAI's `split(':', 2)` cuts it at its next colon), and lines
- * before the first speaker — or a block with none — are a system turn of their
- * own rather than dropped, so an edited request does not lose the creator's text.
- */
-export function risuExampleSides(text: string, { user, char }: ExampleSpeakers): ExampleSide[] {
-  const assistant = ['{{char}}:', '<bot>:', ...char.map((name) => `${name}:`)];
-  const reader = ['{{user}}:', '<user>:', `${user}:`];
-  const loose: string[] = [];
-  const sides: ExampleSide[] = [];
-  let current: ExampleSide | null = null;
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim();
-    let said: string | null = null;
-    let role: ExampleSide['role'] = 'assistant';
-    for (const prefix of assistant) if (said === null) said = after(trimmed, prefix);
-    if (said === null) {
-      role = 'user';
-      for (const prefix of reader) if (said === null) said = after(trimmed, prefix);
-    }
-    if (said !== null) {
-      current = { role, content: said.trimStart() };
-      sides.push(current);
-    } else if (current) current.content += `\n${trimmed}`;
-    else loose.push(trimmed);
-  }
-  return [{ role: 'system' as const, content: loose.join('\n') }, ...sides]
-    .map((side) => ({ role: side.role, content: side.content.trim() }))
-    .filter((side) => side.content.length > 0);
 }
 
 /** What an item of `risuRequestView` stands for, so the API can map the request back and report it. */
@@ -251,9 +206,11 @@ export function risuRequestView(prompt: Pick<AssembledPrompt, 'system' | 'messag
         content: promptText(message.content),
         ...risuRequestExtras(source),
         ...(multimodals.length > 0 ? { multimodals } : {}),
+        // A prompt template's `cache` item, as RisuAI marks it.
+        ...(message.cachePoint ? { cachePoint: true } : {}),
       },
       { kind: 'message', at },
-      source?.kind === 'history',
+      source?.kind === 'history' || source?.kind === 'examples',
     );
   };
 
@@ -265,7 +222,9 @@ export function risuRequestView(prompt: Pick<AssembledPrompt, 'system' | 'messag
   });
   for (let at = 0; at < messages.length; at += 1) {
     const source = sources?.[at];
-    if (!risu || source?.kind !== 'examples') {
+    // An example block the assembler sent as its turns is its turns; a SillyTavern
+    // card's, sent whole, goes as RisuAI's.
+    if (!risu || source?.kind !== 'examples' || !source.speakers) {
       whole(at);
       continue;
     }

@@ -481,9 +481,11 @@ describe('a work’s modules in the prompt', () => {
     };
     const prompt = assemblePrompt({ plot, characters: [aria], history: [], userName: '민준', report: true });
     const at = (text: string) => prompt.system.indexOf(text);
-    expect(at('작품의 로어')).toBeLessThan(at('카드의 로어'));
-    expect(at('카드의 로어')).toBeLessThan(at('모듈의 로어'));
-    expect(prompt.report!.lore.map((entry) => entry.source)).toEqual(['plot', '아리아', '날씨']);
+    // RisuAI's book runs the character's lore, then the modules', and sends
+    // entries of one insertion order in the reverse of that.
+    expect(at('모듈의 로어')).toBeLessThan(at('카드의 로어'));
+    expect(at('카드의 로어')).toBeLessThan(at('작품의 로어'));
+    expect(prompt.report!.lore.map((entry) => entry.source)).toEqual(['날씨', '아리아', 'plot']);
   });
 
   it('sends the indicator entries as RisuAI does in a module: description and global note as lore, never the first messages', async () => {

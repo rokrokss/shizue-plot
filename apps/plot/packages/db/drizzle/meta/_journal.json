@@ -15,6 +15,13 @@
       "when": 1792352422441,
       "tag": "0001_model_profiles",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792355669018,
+      "tag": "0002_reader_preset_settings",
+      "breakpoints": true
     }
   ]
 }

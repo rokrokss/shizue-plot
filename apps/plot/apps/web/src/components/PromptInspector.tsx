@@ -59,7 +59,10 @@ export function PromptInspector({ chatId }: { chatId: string }) {
   }
 
   const tokens = (count: number): string => t('tokens', { count: format.number(count) });
+  /** A block's label, with the prompt cache's point where the preset's `cache` item put one. */
   const kindLabel = (block: Block): string =>
+    block.cachePoint ? `${baseLabel(block)} · ${t('cachePoint')}` : baseLabel(block);
+  const baseLabel = (block: Block): string =>
     block.kind === 'history'
       ? t(`roles.${block.label === 'user' ? 'user' : 'assistant'}`)
       : block.kind === 'request'

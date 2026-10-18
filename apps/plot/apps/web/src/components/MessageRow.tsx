@@ -261,6 +261,7 @@ export const MessageRow = memo(function MessageRow({
   onDelete,
   hidden = false,
   onToggleHidden,
+  onHideAbove,
   footer,
   translator,
   translationId,
@@ -375,6 +376,11 @@ export const MessageRow = memo(function MessageRow({
   hidden?: boolean;
   /** Hides the message from the AI, or shows it to the AI again; the page owns the request. */
   onToggleHidden?: () => void;
+  /**
+   * RisuAI's "disable above": hides the message and every one before it, or
+   * shows them all again where the message is hidden.
+   */
+  onHideAbove?: () => void;
   /**
    * What stands under the row (the last reply's bar). A function is handed the
    * row's own way into its editor, or null where the row cannot be edited.
@@ -550,6 +556,17 @@ export const MessageRow = memo(function MessageRow({
           <span className="hidden sm:inline">{hidden ? t('showToAi') : t('hideFromAi')}</span>
         </button>
       ) : null}
+      {onHideAbove && showActions ? (
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={onHideAbove}
+          title={hidden ? t('showAboveToAi') : t('hideAboveFromAiHint')}
+          className={cx(QUIET_ACTION, FOCUS_RING, 'hidden hover:text-link sm:inline')}
+        >
+          {hidden ? t('showAboveToAi') : t('hideAboveFromAi')}
+        </button>
+      ) : null}
       {onDelete && showActions ? (
         <button
           type="button"
@@ -609,6 +626,11 @@ export const MessageRow = memo(function MessageRow({
         {onToggleHidden ? (
           <Button disabled={disabled} onClick={act(onToggleHidden)}>
             {hidden ? t('showToAi') : t('hideFromAi')}
+          </Button>
+        ) : null}
+        {onHideAbove ? (
+          <Button disabled={disabled} onClick={act(onHideAbove)}>
+            {hidden ? t('showAboveToAi') : t('hideAboveFromAi')}
           </Button>
         ) : null}
         {onDelete ? (

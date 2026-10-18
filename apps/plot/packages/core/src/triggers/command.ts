@@ -49,7 +49,8 @@ export interface LoreTestActive {
   tokens: number;
   priority: number;
   source: string;
-  inject: null;
+  /** RisuAI's `inject` (`@@inject_*`), or null. */
+  inject: { operation: 'append' | 'prepend' | 'replace'; location: string; param: string; lore: boolean } | null;
 }
 
 /** What `/test_lorebook` reads and answers with, as JSON. */

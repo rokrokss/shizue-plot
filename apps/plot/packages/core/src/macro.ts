@@ -129,6 +129,11 @@ export interface MacroContext {
    */
   assetNames?: readonly string[];
   /**
+   * What RisuAI's {{chardisplayasset}} lists: the character's pictures, where its
+   * card asks for the image-tag instruction (`prebuiltAssetCommand`). Without it the list is empty.
+   */
+  displayAssets?: readonly string[];
+  /**
    * The prompt's data for RisuAI's functions (`MacroHostData`). Given, the text
    * is read as RisuAI reads a prompt: {{comment}} says nothing and {{file}}
    * decodes. Without it those two are left as written, for a screen to draw.
@@ -744,7 +749,9 @@ function expand(text: string, ctx: MacroContext, depth: number): string {
     char: ctx.char,
     ...(clock ? { clock } : {}),
     ...(risuSeed ? { seed: risuSeed } : {}),
-    ...(ctx.assetNames ? { assets: { names: ctx.assetNames } } : {}),
+    ...(ctx.assetNames
+      ? { assets: { names: ctx.assetNames, ...(ctx.displayAssets ? { display: ctx.displayAssets } : {}) } }
+      : {}),
   };
   let iterations = 0;
   const limit = text.length + MAX_EXPANDED_GROWTH;

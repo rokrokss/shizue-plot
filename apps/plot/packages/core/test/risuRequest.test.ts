@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { RISU_DEFAULT_FORMATING_ORDER, SPEECH_PROTOCOL_REMINDER, type PromptPreset } from '../src/presets.js';
 import { assemblePrompt, type HistoryMessage, type PromptCharacter, type PromptPlot } from '../src/prompt.js';
-import { RISU_NEW_CHAT, RISU_REQUEST_ITEMS, risuExampleSides, risuRequestExtras, risuRequestView } from '../src/risuRequest.js';
+import { risuExampleSides } from '../src/prompt.js';
+import { RISU_NEW_CHAT, RISU_REQUEST_ITEMS, risuRequestExtras, risuRequestView } from '../src/risuRequest.js';
 import { DEFAULT_LORE_SETTINGS, type NormalizedCard } from '../src/types.js';
 
 const card: NormalizedCard = {
@@ -89,7 +90,10 @@ describe('the request as RisuAI’s items', () => {
       thoughts: [],
     });
     expect(risuRequestExtras({ kind: 'history', id: 'm-0', greeting: true })).toEqual({ removable: true });
-    expect(risuRequestExtras({ kind: 'examples' })).toEqual({ memo: 'NewChatExample', removable: true });
+    // An example block's separator, its named turns, and a line before any speaker.
+    expect(risuRequestExtras({ kind: 'examples', separator: true })).toEqual({ memo: 'NewChatExample', removable: true });
+    expect(risuRequestExtras({ kind: 'examples', name: 'example_user' })).toEqual({ name: 'example_user', removable: true });
+    expect(risuRequestExtras({ kind: 'examples' })).toEqual({ removable: true });
     expect(risuRequestExtras({ kind: 'new_chat' })).toEqual({ memo: 'NewChat', removable: true });
     expect(risuRequestExtras({ kind: 'memory' })).toEqual({ memo: 'supaMemory' });
     for (const kind of ['directions', 'depth_lore', 'author_note', 'global_note', 'lorebook', 'injection', 'trailing'] as const) {
@@ -119,7 +123,9 @@ describe('the request as RisuAI’s items', () => {
     // RisuAI's default order: the chat, its newest turn, then the global note and the
     // author's note — and what follows everything, ours among it.
     expect(prompt.sources).toEqual([
-      { kind: 'examples', speakers: { user: '민준', char: ['아리아', '아리아'] } },
+      { kind: 'examples', separator: true },
+      { kind: 'examples', name: 'example_user' },
+      { kind: 'examples', name: 'example_assistant' },
       { kind: 'new_chat' },
       { kind: 'history', id: 'greeting', greeting: true },
       { kind: 'history', id: 'm-1' },
@@ -212,12 +218,9 @@ describe('the request as RisuAI’s items', () => {
       { role: 'system', content: SPEECH_PROTOCOL_REMINDER },
       { role: 'system', content: '[Game ruling]\n문이 열린다.' },
     ]);
-    expect(origins).toEqual([
-      { kind: 'system', at: 0 },
-      ...Array.from({ length: 3 }, () => ({ kind: 'example', at: 0 })),
-      ...Array.from({ length: 2 }, () => ({ kind: 'example', at: 1 })),
-      ...[2, 3, 4, 5, 6, 7, 8, 9].map((at) => ({ kind: 'message', at })),
-    ]);
+    // The assembler sends each of RisuAI's example turns as a message of its own.
+    expect(origins).toEqual([{ kind: 'system', at: 0 }, ...Array.from({ length: 13 }, (_, at) => ({ kind: 'message', at }))]);
+    expect(prompt.messages.slice(0, 5).map((message) => message.role)).toEqual(['system', 'user', 'assistant', 'system', 'assistant']);
   });
 
   it('sends the memory as its own supaMemory turn — at the head of the chat without a memory item, among the system turns with one', () => {

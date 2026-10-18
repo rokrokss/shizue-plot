@@ -18,26 +18,47 @@ import {
   type LoreRole,
   type LoreSelectiveLogic,
   type LoreTrigger,
+  type RisuLoreInjection,
+  type RisuLoreOptions,
 } from '../types.js';
 
-/** The V3 decorator subset this implementation understands. */
+/** RisuAI's placements, of which an entry has one (`pos` in `loadLoreBookV3Prompt`): whichever decorator set it last. */
+export type RisuLorePos =
+  | 'depth'
+  | 'reverse_depth'
+  | 'before_desc'
+  | 'after_desc'
+  | 'personality'
+  | 'scenario'
+  | `pt_${string}`;
+
+/** The decorators RisuAI's lorebook reads (`loadLoreBookV3Prompt`), as read off an entry's content. */
 export interface LoreDecorators {
   constant?: boolean;
+  /**
+   * RisuAI's one placement: `@@depth N`, `@@reverse_depth N`, `@@end` (depth 0)
+   * and `@@position …` each set it, so the last of them stands.
+   */
+  pos?: RisuLorePos;
+  /** The depth `@@depth`, `@@reverse_depth` or `@@end` set. */
   depth?: number;
   role?: LoreRole;
-  position?: LorePosition;
-  /** Any `@@position`, the slots `position` cannot name (`pt_…`) included (`LoreEntry.positioned`). */
-  positioned?: true;
   /** `@@activate_only_after N`. */
   delay?: number;
+  /** `@@activate_only_every N`. */
+  every?: number;
   /** `@@scan_depth N`. */
   scanDepth?: number;
+  /** `@@is_greeting N`. */
+  greeting?: number;
   /** `@@keep_activate_after_match`. */
   sticky?: number;
   /** `@@dont_activate_after_match`. */
   cooldown?: number;
   /** `@@probability N`, clamped to 0–100. */
   probability?: number;
+  /** `@@priority N`, or `@@ignore_on_max_context` (-1000). */
+  priority?: number;
   /** `@@activate` or `@@dont_activate`, whichever comes last. */
   force?: 'activate' | 'deactivate';
   /** `@@additional_keys a,b`, one list per line, case kept. */
@@ -46,6 +67,14 @@ export interface LoreDecorators {
   excludeKeys?: string[];
   /** `@@exclude_keys_all a,b`, every line's keys together, case kept. */
   excludeAllKeys?: string[];
+  /** `@@recursive` (true) or `@@unrecursive` (false), whichever comes last. */
+  recursive?: boolean;
+  /** `@@no_recursive_search`. */
+  noRecursiveSearch?: true;
+  /** `@@match_full_word` (true) or `@@match_partial_word` (false), whichever comes last. */
+  fullWord?: boolean;
+  /** `@@inject_lore`, `@@inject_at`, `@@inject_replace`, `@@inject_prepend`, built up as RisuAI builds its `inject`. */
+  inject?: RisuLoreInjection;
 }
 
 /**
@@ -56,105 +85,177 @@ export interface LoreDecorators {
  */
 export const FOREVER_MESSAGES = 10000;
 
-/** `@@name arg`. `@@@name` (a fallback decorator) does not match and is stripped. */
-const DECORATOR_LINE = /^@@([a-z_]+)(?:[ \t]+(.*))?$/;
-
-const count = (arg: string): number | undefined => {
-  const value = Number.parseInt(arg, 10);
+/** RisuAI's `parseInt`, refusing what it reads as NaN and, where a count is meant, a negative. */
+const count = (arg: string | undefined): number | undefined => {
+  const value = Number.parseInt(arg ?? '', 10);
   return Number.isFinite(value) && value >= 0 ? value : undefined;
 };
 
-/** A decorator's comma-separated keys, as RisuAI's parser splits them. */
-const keyList = (arg: string): string[] =>
-  arg.split(',').map((key) => key.trim()).filter((key) => key.length > 0);
+/** The placements `@@position` takes besides a prompt template's `pt_` slots. */
+const RISU_POSITIONS: readonly string[] = ['after_desc', 'before_desc', 'personality', 'scenario'];
 
 /**
- * Splits the leading `@@`-prefixed decorator lines of a V3 lorebook entry off its
- * content and interprets the supported subset. Unsupported decorators are
- * stripped without effect, per spec.
+ * Splits the leading decorator lines of a lorebook entry off its content, the
+ * way RisuAI's lorebook does: ccardlib's `decorator.parse` walks the trimmed
+ * content's lines while they start with `@@`, names each by what follows `@@` up
+ * to the first space and splits the rest on commas, and hands it to the
+ * lorebook's switch (`loadLoreBookV3Prompt`) — whose `false`, for a decorator it
+ * does not know or an argument it cannot read, lets the next `@@@` line (a
+ * fallback) be read in its place; any other `@@@` line is skipped, and `@@@end`
+ * is `@@end` always. The body is the rest, trimmed.
  *
+ * Every decorator RisuAI's lorebook reads is read here. `@@disable_ui_prompt`
+ * is read and does nothing, as there (RisuAI collects it and never uses it), and
+ * so are the instruct-mode decorators and `@@is_user_icon`, which RisuAI refuses.
  * The key decorators may repeat, and RisuAI applies every line: its own import
  * of a SillyTavern entry writes NOT_ANY and AND_ALL as one `@@exclude_keys` or
  * `@@additional_keys` line per key. Of the rest, the last line wins.
  */
 export function parseDecorators(content: string): { decorators: LoreDecorators; body: string } {
-  const lines = content.split('\n');
+  const lines = content.trim().split('\n');
   const decorators: LoreDecorators = {};
-  let start = 0;
-  for (; start < lines.length; start += 1) {
-    const line = lines[start]!.trim();
-    if (!line.startsWith('@@')) break;
-    const match = DECORATOR_LINE.exec(line);
-    if (!match) continue;
-    const raw = (match[2] ?? '').trim();
-    const arg = raw.toLowerCase();
-    switch (match[1]) {
+  /** RisuAI's switch: false where it does not take the decorator. */
+  const read = (name: string, args: string[]): boolean => {
+    const first = args[0];
+    switch (name) {
       case 'constant':
         decorators.constant = true;
-        break;
-      case 'depth': {
-        const depth = count(arg);
-        if (depth !== undefined) decorators.depth = depth;
-        break;
-      }
-      case 'role':
-        if (arg === 'user' || arg === 'assistant' || arg === 'system') decorators.role = arg;
-        break;
-      case 'position':
-        if (arg) decorators.positioned = true;
-        if (arg === 'before_desc') decorators.position = 'before_char';
-        else if (arg === 'after_desc') decorators.position = 'after_char';
-        break;
+        return true;
+      case 'end':
+        decorators.pos = 'depth';
+        decorators.depth = 0;
+        return true;
       case 'activate_only_after': {
-        const delay = count(arg);
-        if (delay !== undefined) decorators.delay = delay;
-        break;
+        const delay = count(first);
+        if (delay === undefined) return false;
+        decorators.delay = delay;
+        return true;
       }
-      case 'scan_depth': {
-        const scanDepth = count(arg);
-        if (scanDepth !== undefined) decorators.scanDepth = scanDepth;
-        break;
+      case 'activate_only_every': {
+        const every = count(first);
+        if (every === undefined) return false;
+        decorators.every = every;
+        return true;
       }
+      // Both set their flag and still answer false, as RisuAI's do.
       case 'keep_activate_after_match':
         decorators.sticky = FOREVER_MESSAGES;
-        break;
+        return false;
       case 'dont_activate_after_match':
         decorators.cooldown = FOREVER_MESSAGES;
-        break;
+        return false;
+      case 'depth':
+      case 'reverse_depth': {
+        const depth = count(first);
+        if (depth === undefined) return false;
+        decorators.depth = depth;
+        decorators.pos = name;
+        return true;
+      }
+      case 'role':
+        if (first !== 'user' && first !== 'assistant' && first !== 'system') return false;
+        decorators.role = first;
+        return true;
+      case 'scan_depth': {
+        const scanDepth = count(first);
+        if (scanDepth !== undefined) decorators.scanDepth = scanDepth;
+        return true;
+      }
+      case 'is_greeting': {
+        const greeting = count(first);
+        if (greeting === undefined) return false;
+        decorators.greeting = greeting;
+        return true;
+      }
+      case 'position':
+        if (first === undefined || !(first.startsWith('pt_') || RISU_POSITIONS.includes(first))) return false;
+        decorators.pos = first as RisuLorePos;
+        return true;
+      case 'inject_lore':
+      case 'inject_at':
+        decorators.inject = {
+          ...(decorators.inject ?? { operation: 'append', param: '' }),
+          location: args.join(' '),
+          lore: name === 'inject_lore',
+        };
+        return true;
+      case 'inject_replace':
+      case 'inject_prepend':
+        decorators.inject = {
+          ...(decorators.inject ?? { location: '', lore: false }),
+          operation: name === 'inject_replace' ? 'replace' : 'prepend',
+          param: args.join(' '),
+        };
+        return true;
+      case 'ignore_on_max_context':
+        decorators.priority = -1000;
+        return true;
+      case 'additional_keys':
+        if (args.length > 0) decorators.additionalKeys = [...(decorators.additionalKeys ?? []), args];
+        return true;
+      case 'exclude_keys':
+        if (args.length > 0) decorators.excludeKeys = [...(decorators.excludeKeys ?? []), ...args];
+        return true;
+      case 'exclude_keys_all':
+        if (args.length > 0) decorators.excludeAllKeys = [...(decorators.excludeAllKeys ?? []), ...args];
+        return true;
+      case 'match_full_word':
+        decorators.fullWord = true;
+        return true;
+      case 'match_partial_word':
+        decorators.fullWord = false;
+        return true;
+      case 'activate':
+        decorators.force = 'activate';
+        return true;
+      case 'dont_activate':
+        decorators.force = 'deactivate';
+        return true;
+      case 'disable_ui_prompt':
+        return first === 'post_history_instructions' || first === 'system_prompt';
       case 'probability': {
         // RisuAI drops the entry when a roll of 0–100 exceeds N, so anything
         // under 0 never fires and anything from 100 always does.
-        const chance = Number.parseInt(arg, 10);
+        const chance = Number.parseInt(first ?? '', 10);
         if (Number.isFinite(chance)) decorators.probability = Math.min(100, Math.max(0, chance));
-        break;
+        return true;
       }
-      case 'activate':
-        decorators.force = 'activate';
-        break;
-      case 'dont_activate':
-        decorators.force = 'deactivate';
-        break;
-      // Keys are matched as written, so these arguments keep their case.
-      case 'additional_keys': {
-        const keys = keyList(raw);
-        if (keys.length > 0) decorators.additionalKeys = [...(decorators.additionalKeys ?? []), keys];
-        break;
+      case 'priority': {
+        const priority = Number.parseInt(first ?? '', 10);
+        if (Number.isFinite(priority)) decorators.priority = priority;
+        return true;
       }
-      case 'exclude_keys': {
-        const keys = keyList(raw);
-        if (keys.length > 0) decorators.excludeKeys = [...(decorators.excludeKeys ?? []), ...keys];
-        break;
-      }
-      case 'exclude_keys_all': {
-        const keys = keyList(raw);
-        if (keys.length > 0) decorators.excludeAllKeys = [...(decorators.excludeAllKeys ?? []), ...keys];
-        break;
-      }
+      case 'unrecursive':
+        decorators.recursive = false;
+        return true;
+      case 'recursive':
+        decorators.recursive = true;
+        return true;
+      case 'no_recursive_search':
+        decorators.noRecursiveSearch = true;
+        return true;
       default:
-        break;
+        return false;
     }
+  };
+  let fallback = false;
+  for (let at = 0; at < lines.length; at += 1) {
+    let line = lines[at]!.trim();
+    if (line === '@@@end') line = '@@end';
+    if (!line.startsWith('@@')) return { decorators, body: lines.slice(at).join('\n').trim() };
+    const fallbackLine = line.startsWith('@@@');
+    if (fallbackLine && !fallback) continue;
+    const space = line.indexOf(' ');
+    const end = space === -1 ? line.length : space;
+    const name = line.slice(fallbackLine ? 3 : 2, end);
+    const args = line
+      .slice(end)
+      .split(',')
+      .map((arg) => arg.trim())
+      .filter((arg) => arg !== '');
+    fallback = name !== '' ? !read(name, args) : false;
   }
-  return { decorators, body: lines.slice(start).join('\n') };
+  return { decorators, body: '' };
 }
 
 type Json = Record<string, unknown>;
@@ -519,6 +620,38 @@ interface BaseEntry {
   position: LorePosition;
 }
 
+/**
+ * Where RisuAI's one placement (`LoreDecorators.pos`) puts the entry here:
+ * `@@depth` and `@@reverse_depth` at a depth, counted from the start or the end
+ * of its chat block; `before_desc` before the description; `after_desc`,
+ * `personality` and `scenario` after it — RisuAI sends all three there; a
+ * prompt template's `pt_` slot nowhere but where `{{position::…}}` asks.
+ */
+function placementOf(pos: NonNullable<LoreDecorators['pos']>, depth: number | undefined): {
+  position?: LorePosition;
+  depth?: number;
+  risu?: RisuLoreOptions;
+} {
+  if (pos === 'depth' || pos === 'reverse_depth') {
+    return { depth: depth ?? 0, risu: { depthFrom: pos === 'depth' ? 'start' : 'end' } };
+  }
+  if (pos === 'before_desc') return { position: 'before_char' };
+  if (pos.startsWith('pt_')) return { risu: { slot: pos.slice('pt_'.length) } };
+  return { position: 'after_char' };
+}
+
+/** The rest of RisuAI's decorators, as the entry's `risu` (`RisuLoreOptions`) — empty where none was written. */
+function risuOptionsOf(decorators: LoreDecorators): RisuLoreOptions {
+  return {
+    ...(decorators.every !== undefined ? { every: decorators.every } : {}),
+    ...(decorators.greeting !== undefined ? { greeting: decorators.greeting } : {}),
+    ...(decorators.priority !== undefined ? { priority: decorators.priority } : {}),
+    ...(decorators.recursive === true ? { recursive: true as const } : {}),
+    ...(decorators.fullWord !== undefined ? { fullWord: decorators.fullWord } : {}),
+    ...(decorators.inject ? { inject: decorators.inject satisfies RisuLoreInjection } : {}),
+  };
+}
+
 /** Layers the ST settings, then the decorators, onto the entry's own fields. */
 function assemble(
   base: BaseEntry,
@@ -528,18 +661,20 @@ function assemble(
   const { position: stPosition, depth: stDepth, role: stRole, outletName, ...stRest } = sillyTavern;
   let position = base.position;
   let depth: number | undefined;
-  let role: LoreRole | undefined;
-  if (decorators.position !== undefined) {
-    // Per spec, `@@position` takes precedence over `@@depth`.
-    position = decorators.position;
-  } else if (decorators.depth !== undefined) {
-    depth = decorators.depth;
-    role = decorators.role ?? stRole;
+  let placed: RisuLoreOptions = {};
+  if (decorators.pos !== undefined) {
+    // RisuAI keeps one placement, which the last of its decorators set.
+    const placement = placementOf(decorators.pos, decorators.depth);
+    position = placement.position ?? position;
+    depth = placement.depth;
+    placed = placement.risu ?? {};
   } else {
     position = stPosition ?? position;
     depth = stDepth;
-    role = decorators.role ?? stRole;
   }
+  // RisuAI's `@@role` goes wherever the entry does; SillyTavern's only with a depth.
+  const role = decorators.role ?? (depth !== undefined ? stRole : undefined);
+  const risu: RisuLoreOptions = { ...placed, ...risuOptionsOf(decorators) };
 
   const entry: LoreEntry = {
     ...base,
@@ -549,15 +684,23 @@ function assemble(
     position,
     // The outlet's name only means something while the entry is an outlet.
     ...(position === 'outlet' && outletName ? { outletName } : {}),
-    ...(decorators.positioned ? { positioned: true as const } : {}),
+    // The card placed it with `@@position`, so it stays where it was put.
+    ...(decorators.pos !== undefined && decorators.pos !== 'depth' && decorators.pos !== 'reverse_depth'
+      ? { positioned: true as const }
+      : {}),
     ...(depth === undefined ? {} : { depth }),
-    ...(depth !== undefined && role ? { role } : {}),
+    ...(role ? { role } : {}),
     ...stRest,
     ...(decorators.delay !== undefined ? { delay: decorators.delay } : {}),
     ...(decorators.scanDepth !== undefined ? { scanDepth: decorators.scanDepth } : {}),
     ...(decorators.sticky !== undefined ? { sticky: decorators.sticky } : {}),
     ...(decorators.cooldown !== undefined ? { cooldown: decorators.cooldown } : {}),
+    // `@@unrecursive` is SillyTavern's `preventRecursion`, `@@no_recursive_search` its `excludeRecursion`.
+    ...(decorators.recursive === false ? { preventRecursion: true as const } : {}),
+    ...(decorators.noRecursiveSearch ? { excludeRecursion: true as const } : {}),
+    ...(Object.keys(risu).length > 0 ? { risu } : {}),
   };
+  if (decorators.recursive === true) delete entry.preventRecursion;
   if (decorators.probability !== undefined) {
     // 100 is the default, which an entry leaves out.
     if (decorators.probability < 100) entry.probability = decorators.probability;

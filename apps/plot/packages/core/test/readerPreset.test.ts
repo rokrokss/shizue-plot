@@ -45,6 +45,8 @@ describe('readReaderPresetFile — RisuAI', () => {
       toggles: '',
       moduleIntegration: '',
       defaultVariables: '',
+      promptSettings: null,
+      regex: [],
       imported: [
         { kind: 'main', name: '', into: 'main' },
         { kind: 'globalNote', name: '', into: 'globalNote' },
@@ -91,6 +93,33 @@ describe('readReaderPresetFile — RisuAI', () => {
     expect({ ...presetDefaultVariables({ hp: '3' }, imported.defaultVariables) }).toEqual({ hp: '3', mood: '좋음' });
     expect(presetDefaultVariables(undefined, '')).toBeUndefined();
     expect({ ...presetDefaultVariables(undefined, 'a=b=c') }).toEqual({ a: 'b' });
+  });
+
+  it("keeps the preset's prompt settings and regex, which RisuAI's sendChat reads from it", async () => {
+    // database.svelte.ts saves `promptSettings` and `regex: db.presetRegex` in the
+    // preset and loads them back (`db.presetRegex = newPres.regex ?? []`).
+    const script = { comment: 'trim', in: '\\s+$', out: '', type: 'editprocess', ableFlag: false };
+    const imported = await readReaderPresetFile(
+      'p.json',
+      json({
+        mainPrompt: 'm',
+        promptSettings: { sendName: true, sendChatAsSystem: false, postEndInnerFormat: '끝', assistantPrefill: 'x', bogus: 1 },
+        regex: [script, 'not a script', null],
+      }),
+    );
+    expect(imported.promptSettings).toEqual({ sendName: true, postEndInnerFormat: '끝' });
+    expect(imported.regex).toEqual([script]);
+    expect(imported.ignoredSettings).toBe(false);
+    // A file without them has none.
+    const bare = await readReaderPresetFile('p.json', json({ mainPrompt: 'm' }));
+    expect([bare.promptSettings, bare.regex]).toEqual([null, []]);
+    // Stored, they reach the prompt preset; empty ones are absent.
+    expect(readerPromptPreset({ ...stored, promptSettings: imported.promptSettings, regex: imported.regex })).toMatchObject({
+      promptSettings: { sendName: true, postEndInnerFormat: '끝' },
+      regex: [script],
+    });
+    const none = readerPromptPreset({ ...stored, promptSettings: {}, regex: [] });
+    expect('promptSettings' in none || 'regex' in none).toBe(false);
   });
 
   it('reads a module integration as RisuAI’s getModules splits it', () => {
@@ -144,9 +173,10 @@ describe('readReaderPresetFile — RisuAI', () => {
       { kind: 'jailbreak', name: '사용자 탈옥', into: 'template' },
       { kind: 'globalNote', name: '', into: 'template' },
       { kind: 'main', name: '프리필', into: 'template' },
+      // Sent as RisuAI sends a ChatML item.
+      { kind: 'normal', name: 'ChatML', into: 'template' },
     ]);
-    // Kept but not sent yet.
-    expect(imported.ignoredPrompts).toEqual(['ChatML']);
+    expect(imported.ignoredPrompts).toEqual([]);
     // RisuAI keeps the fields a template stands in for; so does the import, which sends none of them.
     expect(imported.main).toBe('STALE-MAIN');
   });
@@ -234,6 +264,8 @@ describe('readReaderPresetFile — SillyTavern', () => {
       toggles: '',
       moduleIntegration: '',
       defaultVariables: '',
+      promptSettings: null,
+      regex: [],
       imported: [
         { kind: 'main', name: 'Main Prompt', into: 'main' },
         { kind: 'jailbreak', name: 'Post-History Instructions', into: 'globalNote' },
@@ -324,6 +356,8 @@ const stored = {
   promptTemplate: null,
   groupTemplate: '',
   groupOtherBotRole: 'user',
+  promptSettings: null,
+  regex: null,
 };
 const reader: PromptPreset = readerPromptPreset(stored);
 
@@ -442,7 +476,8 @@ describe('assemblePrompt — a reader preset', () => {
     });
     // The card's own text, the preset's other texts and the chat's variables, read
     // where the preset asks for them — and the card's `{{original}}` is the preset's text, once.
-    expect(blockOf(prompt, 'main')).toBe('CREATOR-SYS [서리 골짜기/민준 [CREATOR-DESC] [GN 민준] [10]]');
+    // The preset's {{char}} is RisuAI's: the work's one member.
+    expect(blockOf(prompt, 'main')).toBe('CREATOR-SYS [아리아/민준 [CREATOR-DESC] [GN 민준] [10]]');
     expect(blockOf(prompt, 'global_note')).toBe('CREATOR-PH [GN 민준]');
     expect(sentOf(prompt).split('CREATOR-SYS')).toHaveLength(2);
   });

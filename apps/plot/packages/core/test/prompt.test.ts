@@ -103,11 +103,13 @@ const PROTOCOL = speechProtocol(['아리아']);
 const REMINDER = SPEECH_PROTOCOL_REMINDER;
 /** What closes the system string of a one-member, non-utility prompt. */
 const CLOSING = [PROTOCOL, NARRATION_NOTE];
-/** Aria's two example blocks as they are sent. */
-const EXAMPLES = [
-  exampleBlock('민준: 예시 질문 하나\n아리아: 예시 답변 하나'),
-  exampleBlock('민준: 예시 질문 둘\n아리아: 예시 답변 둘'),
-];
+/**
+ * Aria's two example blocks as they are sent, as RisuAI's `exampleMessage` makes
+ * them: each `<START>` a `[Start a new chat]` system turn, and its lines the
+ * user's and her own turns.
+ */
+const EXAMPLES = [NEW_CHAT_SEPARATOR, '예시 질문 하나', '예시 답변 하나', NEW_CHAT_SEPARATOR, '예시 질문 둘', '예시 답변 둘'];
+const EXAMPLE_ROLES = ['system', 'user', 'assistant', 'system', 'user', 'assistant'];
 /** What follows the newest turn on `preset` when nothing else comes: the global note, then the reminder. */
 const TAIL = ['POST', REMINDER];
 /** The texts a prompt sends as one kind of block, in order. */
@@ -148,13 +150,17 @@ describe('assemblePrompt', () => {
     expect(system).toContain(`[Roleplay Setting]\n${DESCRIPTION}\n`);
     expect(system).toContain(OAI2_RESPONSE);
     expect(system.endsWith(CLOSING.join('\n\n'))).toBe(true);
-    // The reminder after the chat, then the OAI preset's jailbreak after everything; the
-    // prefill item asks for a model that takes one, and this request names none.
-    expect(messages.slice(-2)).toEqual([
+    // The reminder after the chat; the OAI preset's jailbreak goes only while the
+    // jailbreak toggle is on, which RisuAI starts off; the prefill item asks for a
+    // model that takes one, and this request names none.
+    expect(messages.at(-1)).toEqual({ role: 'system', content: REMINDER });
+    expect(messages.map((message) => message.content)).not.toContain(OAI_JAILBREAK);
+    expect(risu!.template).toBe(true);
+    const toggled = assemblePrompt({ plot, characters: [aria], history, jailbreak: true });
+    expect(toggled.messages.slice(-2)).toEqual([
       { role: 'system', content: REMINDER },
       { role: 'system', content: OAI_JAILBREAK },
     ]);
-    expect(risu!.template).toBe(true);
     // RisuAI reads no card's system prompt under a template.
     const own = assemblePrompt({ plot, characters: [{ ...aria, card: { ...card, systemPrompt: '카드의 규칙.' } }], history });
     expect(own.system).toBe(system);
@@ -201,7 +207,7 @@ describe('assemblePrompt', () => {
     ]);
   });
 
-  it('resolves {{char}} to the member for card text and to the plot everywhere else', () => {
+  it("resolves {{char}} to a work of one's member everywhere, as RisuAI's currentChar", () => {
     const prompt = assemblePrompt({
       plot: { ...plot, description: '{{char}}의 겨울.' },
       characters: [{ name: '아리아', card: { ...card, description: '{{char}}는 마녀다.', mesExample: '' } }],
@@ -212,13 +218,24 @@ describe('assemblePrompt', () => {
     });
     expect(prompt.system).toBe(
       [
-        '서리 골짜기의 밤 담당 작가.',
-        `아리아는 마녀다.\n\nDescription of 아리아: 무뚝뚝하다.\n\n${scenarioLine('서리 골짜기의 밤의 겨울.')}`,
+        '아리아 담당 작가.',
+        `아리아는 마녀다.\n\nDescription of 아리아: 무뚝뚝하다.\n\n${scenarioLine('아리아의 겨울.')}`,
         ...CLOSING,
       ].join('\n\n'),
     );
-    expect(prompt.messages[0]).toEqual({ role: 'system', content: '서리 골짜기의 밤의 지난 이야기.' });
-    expect(sentAs(prompt, 'global_note')).toEqual(['서리 골짜기의 밤 유지.']);
+    expect(prompt.messages[0]).toEqual({ role: 'system', content: '아리아의 지난 이야기.' });
+    expect(sentAs(prompt, 'global_note')).toEqual(['아리아 유지.']);
+    // Renaming the work changes none of it.
+    const renamed = assemblePrompt({
+      plot: { ...plot, name: '새 이름', description: '{{char}}의 겨울.' },
+      characters: [{ name: '아리아', card: { ...card, description: '{{char}}는 마녀다.', mesExample: '' } }],
+      history,
+      preset: legacyPreset('{{char}} 담당 작가.', '{{char}} 유지.'),
+      userName: '민준',
+      memoryText: '{{char}}의 지난 이야기.',
+    });
+    expect(renamed.system).toBe(prompt.system);
+    expect(renamed.messages).toEqual(prompt.messages);
   });
 
   it('reads a member its scripts renamed, and the greeting they rewrote, as this chat has them', () => {
@@ -360,7 +377,7 @@ describe('assemblePrompt', () => {
 
   it("sends memoryText at the head of the chat, where RisuAI's HypaV3 puts its summary, with macros expanded", () => {
     const memoryText = '[Summary of the story so far]\n{{user}}와(과) {{char}}는 이미 만난 적이 있다.';
-    const memory = '[Summary of the story so far]\n민준와(과) 서리 골짜기의 밤는 이미 만난 적이 있다.';
+    const memory = '[Summary of the story so far]\n민준와(과) 아리아는 이미 만난 적이 있다.';
     const prompt = assemblePrompt({
       plot,
       characters: [aria],
@@ -374,7 +391,7 @@ describe('assemblePrompt', () => {
     expect(prompt.system).toBe(['MAIN', DESCRIPTION, '대학생.', ...CLOSING].join('\n\n'));
     expect(prompt.messages[0]).toEqual({ role: 'system', content: memory });
     expect(prompt.sources![0]).toEqual({ kind: 'memory' });
-    expect(prompt.messages.slice(1, 3).map((message) => message.content)).toEqual(EXAMPLES);
+    expect(prompt.messages.slice(1, 1 + EXAMPLES.length).map((message) => message.content)).toEqual(EXAMPLES);
     // A template's memory item holds it among the system turns, a turn of its own for RisuAI.
     const templated = assemblePrompt({ plot, characters: [aria], history, userName: '민준', memoryText });
     expect(templated.risu!.system.map((part) => part.memo)).toEqual([undefined, 'supaMemory', undefined]);
@@ -618,8 +635,7 @@ describe('assemblePrompt', () => {
     // Everything fits: two example blocks, RisuAI's separator, the whole history,
     // then the global note and the reminder.
     expect(full.messages.map((m) => m.role)).toEqual([
-      'system',
-      'system',
+      ...EXAMPLE_ROLES,
       'system',
       'assistant',
       'user',
@@ -628,7 +644,7 @@ describe('assemblePrompt', () => {
       'system',
       'system',
     ]);
-    expect(full.messages.slice(0, 3).map((m) => m.content)).toEqual([...EXAMPLES, NEW_CHAT_SEPARATOR]);
+    expect(full.messages.slice(0, EXAMPLES.length + 1).map((m) => m.content)).toEqual([...EXAMPLES, NEW_CHAT_SEPARATOR]);
 
     // Room for the full history and the separator: the examples are evicted.
     const withSeparator = assemble(fixed + sum(historyTokens) + countTokens(NEW_CHAT_SEPARATOR));
@@ -666,15 +682,19 @@ describe('assemblePrompt', () => {
       userName: '민준',
       report: true,
     });
-    expect(messages.slice(0, 2).map((m) => m.content)).toEqual([
-      exampleBlock('아리아: 아리아의 예시'),
-      exampleBlock('민수: 민수의 예시'),
+    expect(messages.slice(0, 4).map((m) => m.content)).toEqual([NEW_CHAT_SEPARATOR, '아리아의 예시', NEW_CHAT_SEPARATOR, '민수의 예시']);
+    // The inspector says whose each is, and the request editors which turn of a block each is.
+    expect(report!.blocks.filter((block) => block.kind === 'examples').map((block) => block.label)).toEqual([
+      '아리아',
+      '아리아',
+      '민수',
+      '민수',
     ]);
-    // The inspector says whose each is, and the request editors whose lines it holds.
-    expect(report!.blocks.filter((block) => block.kind === 'examples').map((block) => block.label)).toEqual(['아리아', '민수']);
-    expect(sources!.slice(0, 2).map((source) => source.speakers)).toEqual([
-      { user: '민준', char: ['아리아', '아리아'] },
-      { user: '민준', char: ['민수', '민수'] },
+    expect(sources!.slice(0, 4).map((source) => source.name ?? (source.separator ? 'separator' : ''))).toEqual([
+      'separator',
+      'example_assistant',
+      'separator',
+      'example_assistant',
     ]);
   });
 
@@ -719,7 +739,7 @@ const withLore = (lorebook: LoreEntry[], contextBudget = 100_000) =>
   });
 
 describe('assemblePrompt - merged lorebook', () => {
-  it('activates the plot book and every member book as one, plot first on a tie', () => {
+  it("activates the plot book and every member book as one, ties in RisuAI's reversed order", () => {
     const prompt = assemblePrompt({
       plot: {
         ...plot,
@@ -741,12 +761,13 @@ describe('assemblePrompt - merged lorebook', () => {
       preset,
       userName: '민준',
     });
-    // insertionOrder decides across books; the stable sort keeps the plot ahead
-    // of a member entry it ties with, and members in roster order behind it.
-    expect(sentAs(prompt, 'lorebook')).toEqual(['MINSU', 'PLOT', 'ARIA']);
+    // insertionOrder decides across books; entries of one order go in the
+    // reverse of the book's order — the plot's, then the members' in roster
+    // order — as RisuAI's sort-then-reverse leaves them.
+    expect(sentAs(prompt, 'lorebook')).toEqual(['MINSU', 'ARIA', 'PLOT']);
   });
 
-  it('resolves {{char}} in each book against whoever the book belongs to', () => {
+  it("resolves {{char}} in each book as RisuAI's: a work of one's own lore is about its member too", () => {
     const prompt = assemblePrompt({
       plot: { ...plot, lorebook: [loreEntry({ content: '{{char}} 세계.', insertionOrder: 0 })] },
       characters: [
@@ -759,7 +780,7 @@ describe('assemblePrompt - merged lorebook', () => {
       preset,
       userName: '민준',
     });
-    expect(sentAs(prompt, 'lorebook')).toEqual(['서리 골짜기의 밤 세계.', '아리아 기억.']);
+    expect(sentAs(prompt, 'lorebook')).toEqual(['아리아 세계.', '아리아 기억.']);
   });
 
   it('takes the scan depth and the lore budget from the first member', () => {
@@ -1039,7 +1060,6 @@ describe('assemblePrompt - the moved lore', () => {
       REMINDER,
       'KEY',
       '[Game ruling]\n판정.',
-      OAI_JAILBREAK,
     ]);
   });
 
@@ -1652,8 +1672,7 @@ describe('assemblePrompt - report', () => {
     // One block per message, in the same order and with the same text.
     expect(messageBlocks.map((block) => block.text)).toEqual(result.messages.map((m) => promptText(m.content)));
     expect(messageBlocks.map((block) => block.kind)).toEqual([
-      'examples',
-      'examples',
+      ...EXAMPLES.map(() => 'examples'),
       'new_chat',
       'history',
       'history',
@@ -1666,7 +1685,7 @@ describe('assemblePrompt - report', () => {
       'directions',
     ]);
     expect(messageBlocks[0]!.label).toBe('아리아');
-    expect(messageBlocks[6]!.label).toBe('depth 1');
+    expect(messageBlocks[EXAMPLES.length + 4]!.label).toBe('depth 1');
 
     expect(report.history).toEqual({ included: 4, total: 4 });
     expect(report.examples).toEqual({ included: 2, total: 2 });
@@ -1916,11 +1935,11 @@ describe('assemblePrompt - narration', () => {
     expect(messages.some((message) => promptText(message.content).includes('@:'))).toBe(false);
   });
 
-  it('expands macros in the narration body against the plot', () => {
+  it("expands macros in the narration body as the history's, {{char}} the work's one member", () => {
     const { messages } = assembleNarrated([{ role: 'user', content: '@:  {{char}}의 첫 밤.' }]);
     expect(messages[1]).toEqual({
       role: 'user',
-      content: `${NARRATION_HEADER} 서리 골짜기의 밤의 첫 밤.`,
+      content: `${NARRATION_HEADER} 아리아의 첫 밤.`,
     });
   });
 
@@ -2014,10 +2033,10 @@ describe('assemblePrompt - narrator', () => {
     const prompt = assembleWith({
       plot: { ...plot, narrator: { voice: '{{char}}를 멀리서 지켜보는 건조한 문장.', pov: 'third' } },
     });
-    // The narrator is the plot's, so its macros resolve against the plot. The
+    // The narrator is the plot's, its {{char}} RisuAI's — the work's one member. The
     // labels name the prose, not a narrator: they govern a reply's 지문 as well.
     expect(sentAs(prompt, 'narrator')).toEqual([
-      `Narrative style: 서리 골짜기의 밤를 멀리서 지켜보는 건조한 문장.\nPoint of view: ${NARRATOR_POV_LABELS.third}`,
+      `Narrative style: 아리아를 멀리서 지켜보는 건조한 문장.\nPoint of view: ${NARRATOR_POV_LABELS.third}`,
     ]);
     expect(prompt.system).not.toContain('Narrative style');
     // RisuAI has no place for it: it goes after the global note and the reminder.
@@ -2269,8 +2288,19 @@ describe('assemblePrompt - nickname', () => {
     const texts = messages.map((message) => promptText(message.content));
     // RisuAI's lorebook place, after the newest turn.
     expect(texts).toContain('아리의 로어');
-    const examples = texts.filter((text) => text.startsWith(`${NEW_CHAT_SEPARATOR}\n`));
-    expect(examples[0]).toBe(exampleBlock('민준: 예시 질문 하나\n아리: 예시 답변 하나'));
+    // The example lines are told apart under the nickname too: RisuAI's `{{char}}:`.
+    expect(texts.slice(0, 3)).toEqual([NEW_CHAT_SEPARATOR, '예시 질문 하나', '예시 답변 하나']);
+    expect(messages.slice(1, 3).map((message) => message.role)).toEqual(['user', 'assistant']);
+    // And everything else of the work's reads it as RisuAI's {{char}} does.
+    const greeted = assemblePrompt({
+      plot,
+      characters: [nicknamed],
+      history: [{ role: 'assistant', content: '{{char}}가 문을 연다.' }, ...history.slice(1)],
+      preset: legacyPreset('{{char}}의 작가.', 'POST'),
+      userName: '민준',
+    });
+    expect(greeted.system.startsWith('아리의 작가.')).toBe(true);
+    expect(greeted.messages.map((message) => promptText(message.content))).toContain('아리가 문을 연다.');
   });
 });
 
@@ -2483,9 +2513,10 @@ describe("assemblePrompt - SillyTavern's lore positions", () => {
     expect(system).not.toContain('SHIELD');
     expect(system).not.toContain('NAMELESS');
     expect(texts(messages)).toContain('SHIELD?');
+    // Entries of one order in the reverse of the book's, as RisuAI's sort leaves them.
     expect(report!.lore.map((entry) => entry.placement)).toEqual([
-      'outlet 방어',
       'outlet ',
+      'outlet 방어',
       'outlet 무기',
       'outlet 무기',
     ]);

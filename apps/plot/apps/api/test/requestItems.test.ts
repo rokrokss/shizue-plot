@@ -80,6 +80,8 @@ const promptWith = (images: string[], report = false): AssembledPrompt =>
     memoryText: '[Summary of the story so far]\n둘은 만났다.',
     branch: { length: 2, greeting: { text: '어서 와.', index: -1 } },
     report,
+    // The jailbreak toggle on, so the preset's jailbreak closes the request.
+    jailbreak: true,
   });
 
 /** Runs `withEditedRequest` with an editor that does `edit` to the items it is handed, which it keeps. */
@@ -257,6 +259,7 @@ describe('the request the editors read, and what goes back', () => {
       ],
       userName: '민준',
       branch: { length: 2, greeting: { text: '어서 와.', index: -1 } },
+      jailbreak: true,
     });
     const { seen, sent } = await edited(prompt, (items) =>
       items.map((item, at) =>

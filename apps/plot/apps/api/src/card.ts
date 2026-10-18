@@ -33,6 +33,7 @@ import {
   type LoreTrigger,
   type NormalizedCard,
   type PlotCustomUi,
+  type RisuLoreOptions,
   type Variables,
 } from '@shizue/core';
 import { badRequest } from './errors.js';
@@ -141,6 +142,42 @@ function coerceTavernLore(raw: Record<string, unknown>): Partial<LoreEntry> {
 /** An outlet's name — what `{{outlet::name}}` reads — a label rather than a sentence. */
 const MAX_OUTLET_NAME_LENGTH = 100;
 
+/** A RisuAI decorator's name argument — a slot, an entry's label — and an injection's text to replace. */
+const MAX_RISU_LORE_ARG_LENGTH = 2_000;
+
+/**
+ * RisuAI's own decorators (`LoreEntry.risu`), each only where the client sent a
+ * meaningful one, so an imported RisuAI entry keeps them through every save.
+ */
+function coerceRisuLore(value: unknown): Pick<LoreEntry, 'risu'> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const raw = value as Record<string, unknown>;
+  const text = (key: string): string => str(raw[key]).slice(0, MAX_RISU_LORE_ARG_LENGTH);
+  const inject = raw['inject'] as Record<string, unknown> | undefined;
+  const operation = inject?.['operation'];
+  const slot = text('slot');
+  const risu: RisuLoreOptions = {
+    ...(raw['depthFrom'] === 'start' || raw['depthFrom'] === 'end' ? { depthFrom: raw['depthFrom'] } : {}),
+    ...(slot ? { slot } : {}),
+    ...wholeIn(raw['every'], 0, 10_000, 'every'),
+    ...wholeIn(raw['greeting'], 0, 10_000, 'greeting'),
+    ...wholeIn(raw['priority'], -1_000_000, 1_000_000, 'priority'),
+    ...(raw['recursive'] === true ? { recursive: true as const } : {}),
+    ...(typeof raw['fullWord'] === 'boolean' ? { fullWord: raw['fullWord'] } : {}),
+    ...(inject && typeof inject === 'object' && (operation === 'append' || operation === 'prepend' || operation === 'replace')
+      ? {
+          inject: {
+            operation,
+            location: str(inject['location']).slice(0, MAX_RISU_LORE_ARG_LENGTH),
+            param: str(inject['param']).slice(0, MAX_RISU_LORE_ARG_LENGTH),
+            lore: inject['lore'] === true,
+          },
+        }
+      : {}),
+  };
+  return Object.keys(risu).length > 0 ? { risu } : {};
+}
+
 function coerceLoreEntry(value: unknown): LoreEntry {
   const raw = (value ?? {}) as Record<string, unknown>;
   const depth = num(raw['depth'], -1);
@@ -166,13 +203,10 @@ function coerceLoreEntry(value: unknown): LoreEntry {
     ...(position === 'outlet' && outletName ? { outletName } : {}),
     // The card's own `@@position`, which keeps a keyword entry in the system string (`LoreEntry.positioned`).
     ...(raw['positioned'] === true ? { positioned: true as const } : {}),
-    // role only means something on a depth-injected entry.
-    ...(depth >= 0
-      ? {
-          depth: Math.floor(depth),
-          ...(role === 'user' || role === 'assistant' || role === 'system' ? { role } : {}),
-        }
-      : {}),
+    ...(depth >= 0 ? { depth: Math.floor(depth) } : {}),
+    // A RisuAI `@@role` holds wherever the entry goes; SillyTavern's comes with a depth.
+    ...(role === 'user' || role === 'assistant' || role === 'system' ? { role } : {}),
+    ...coerceRisuLore(raw['risu']),
     ...coerceLoreActivation(raw),
     // Where the entry came from decides whether its scan reads the greeting
     // (`LoreEntry.sillyTavern`), so a save keeps it.
@@ -581,6 +615,7 @@ export function coerceCard(value: unknown, fallbackName: string): NormalizedCard
       recursiveScanning: bool(lore['recursiveScanning'], DEFAULT_LORE_SETTINGS.recursiveScanning),
       ...wholeIn(lore['maxRecursionSteps'], 1, 1000, 'maxRecursionSteps'),
       ...(lore['risuMatching'] === true ? { risuMatching: true } : {}),
+      ...(lore['fullWordMatching'] === true ? { fullWordMatching: true } : {}),
       // SillyTavern's global World Info settings, which a book that runs as ST's reads.
       ...wholeIn(lore['budgetCap'], 1, 1_000_000, 'budgetCap'),
       ...wholeIn(lore['minActivations'], 1, 1000, 'minActivations'),

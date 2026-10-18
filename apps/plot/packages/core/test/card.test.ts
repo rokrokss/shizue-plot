@@ -36,32 +36,68 @@ const toBase64 = (value: unknown): string => Buffer.from(JSON.stringify(value), 
 describe('parseDecorators', () => {
   it('reads the supported subset off the leading decorator block', async () => {
     expect(parseDecorators('@@depth 2\n@@role user\n@@constant\n본문')).toEqual({
-      decorators: { depth: 2, role: 'user', constant: true },
+      decorators: { pos: 'depth', depth: 2, role: 'user', constant: true },
       body: '본문',
     });
-    expect(parseDecorators('@@position before_desc\n본문').decorators).toEqual({
-      position: 'before_char',
-      positioned: true,
-    });
-    expect(parseDecorators('@@position after_desc\n본문').decorators).toEqual({
-      position: 'after_char',
-      positioned: true,
-    });
+    expect(parseDecorators('@@position before_desc\n본문').decorators).toEqual({ pos: 'before_desc' });
+    expect(parseDecorators('@@position after_desc\n본문').decorators).toEqual({ pos: 'after_desc' });
+    // RisuAI keeps one placement, which the last of these sets; @@end is depth 0.
+    expect(parseDecorators('@@depth 2\n@@position after_desc\n본문').decorators).toEqual({ pos: 'after_desc', depth: 2 });
+    expect(parseDecorators('@@position scenario\n@@reverse_depth 3\n본문').decorators).toEqual({ pos: 'reverse_depth', depth: 3 });
+    expect(parseDecorators('@@end\n본문').decorators).toEqual({ pos: 'depth', depth: 0 });
   });
 
   it('strips unknown decorators, fallbacks, and malformed arguments without effect', async () => {
     expect(
       parseDecorators(
-        '@@ignore_on_max_context\n@@@depth 2\n@@depth abc\n@@role narrator\n@@position\n@@scan_depth many\n@@exclude_keys  , \n@@additional_keys ,\n@@probability often\n본문',
+        '@@instruct_depth 2\n@@depth abc\n@@role narrator\n@@position\n@@scan_depth many\n@@exclude_keys  , \n@@additional_keys ,\n@@probability often\n@@disable_ui_prompt system_prompt\n@@is_user_icon x\n본문',
       ),
     ).toEqual({ decorators: {}, body: '본문' });
+  });
+
+  it("reads a @@@ fallback only after a decorator RisuAI's lorebook refused, as ccardlib's parser does", async () => {
+    // A known decorator: the fallback after it is skipped.
+    expect(parseDecorators('@@role user\n@@@depth 2\n본문').decorators).toEqual({ role: 'user' });
+    // An unknown one, or one whose argument it cannot read: the fallback is read in its place.
+    expect(parseDecorators('@@instruct_depth 1\n@@@depth 2\n본문').decorators).toEqual({ pos: 'depth', depth: 2 });
+    expect(parseDecorators('@@role narrator\n@@@role assistant\n본문').decorators).toEqual({ role: 'assistant' });
+    // RisuAI's after-match decorators answer false too, so their fallback is read.
+    expect(parseDecorators('@@keep_activate_after_match\n@@@priority 7\n본문').decorators).toEqual({
+      sticky: 10000,
+      priority: 7,
+    });
+    // @@@end is @@end always; the body is trimmed.
+    expect(parseDecorators('  @@@end\n  본문  \n').decorators).toEqual({ pos: 'depth', depth: 0 });
+    expect(parseDecorators('  @@@end\n  본문  \n').body).toBe('본문');
+  });
+
+  it('reads the rest of what RisuAI\'s lorebook reads', async () => {
+    expect(
+      parseDecorators(
+        '@@activate_only_every 3\n@@is_greeting 1\n@@priority 40\n@@unrecursive\n@@recursive\n@@no_recursive_search\n@@match_full_word\n@@inject_lore 왕궁 지도\n@@inject_replace [자리]\n본문',
+      ).decorators,
+    ).toEqual({
+      every: 3,
+      greeting: 1,
+      priority: 40,
+      recursive: true,
+      noRecursiveSearch: true,
+      fullWord: true,
+      inject: { operation: 'replace', location: '왕궁 지도', param: '[자리]', lore: true },
+    });
+    expect(parseDecorators('@@ignore_on_max_context\n@@inject_at globalNote\n@@inject_prepend x\n본문').decorators).toEqual({
+      priority: -1000,
+      inject: { operation: 'prepend', location: 'globalNote', param: 'x', lore: false },
+    });
+    // Arguments are split on commas and joined with spaces, as RisuAI's are.
+    expect(parseDecorators('@@inject_lore 왕궁, 지도\n본문').decorators.inject?.location).toBe('왕궁 지도');
   });
 
   it('marks any @@position as the author’s placement, a slot it cannot place included', async () => {
     // A prompt template's slot, or one RisuAI reads and we do not, leaves the
     // entry where it would be — but its author placed it, so it stays put.
-    expect(parseDecorators('@@position pt_PI\n본문').decorators).toEqual({ positioned: true });
-    expect(parseDecorators('@@position personality\n본문').decorators).toEqual({ positioned: true });
+    expect(parseDecorators('@@position pt_PI\n본문').decorators).toEqual({ pos: 'pt_PI' });
+    expect(parseDecorators('@@position personality\n본문').decorators).toEqual({ pos: 'personality' });
     const { card } = parseCard({
       ...v3Card,
       data: {
@@ -230,6 +266,8 @@ describe('parseCard - JSON', () => {
       useRegex: true,
       position: 'before_char',
       depth: 4,
+      // RisuAI's @@depth counts from the start of its chat block.
+      risu: { depthFrom: 'start' },
       role: 'assistant',
     });
     const fired = (text: string) =>
@@ -972,8 +1010,8 @@ describe('exportCardV3', () => {
     );
 
     const reparsed = parseCard(exported).card;
-    // `@@position` goes out as V3's own position, which reads back without the author's mark.
-    expect(reparsed.lorebook).toEqual(card.lorebook.map(({ positioned: _placed, ...entry }) => entry));
+    // `@@position` goes out as RisuAI's decorator again, the author's mark with it.
+    expect(reparsed.lorebook).toEqual(card.lorebook);
     expect(reparsed.loreSettings).toEqual(card.loreSettings);
   });
 
@@ -1822,7 +1860,8 @@ describe('SillyTavern cards', () => {
     const [first, second, note] = exported.data.character_book!.entries;
     // Each key as ST wrote it, a regex in its slash form beside a plain one.
     expect(first!.keys).toEqual(['엘프', '/숲(지기|의 왕)/i']);
-    expect(first!.content).toBe('@@depth 2\n@@role assistant\n엘프는 숲의 왕을 섬긴다.');
+    // ST's at-depth counts from the end, RisuAI's @@reverse_depth.
+    expect(first!.content).toBe('@@reverse_depth 2\n@@role assistant\n엘프는 숲의 왕을 섬긴다.');
     expect(first!.extensions).toEqual({
       position: 4,
       depth: 2,
@@ -1904,10 +1943,11 @@ describe('SillyTavern cards', () => {
     const entry: LoreEntry = { ...card.lorebook[1]!, sticky: 10000, cooldown: 12000 };
     const exported = exportCardV3({ ...card, lorebook: [entry, { ...entry, sticky: 9999, cooldown: undefined }] });
     const [forever, counted] = exported.data.character_book!.entries;
+    // The card placed the entry after the description, which goes out too.
     expect(forever!.content).toBe(
-      '@@keep_activate_after_match\n@@dont_activate_after_match\n주막은 국경 검문소 옆이다.',
+      '@@position after_desc\n@@keep_activate_after_match\n@@dont_activate_after_match\n주막은 국경 검문소 옆이다.',
     );
-    expect(counted!.content).toBe('주막은 국경 검문소 옆이다.');
+    expect(counted!.content).toBe('@@position after_desc\n주막은 국경 검문소 옆이다.');
     // Anything past the cap is the same "forever", and comes back as the cap.
     expect(normalizeCard(exported).lorebook[0]).toMatchObject({ sticky: 10000, cooldown: 10000 });
   });
@@ -2003,8 +2043,9 @@ describe('normalizeCard - a RisuAI book', () => {
   });
 
   it('scans recursively and matches the RisuAI way when the card names no settings', async () => {
+    // RisuAI's own lorebook depth then, 5 on every install.
     expect(normalizeCard(risuCard()).loreSettings).toEqual({
-      scanDepth: 4,
+      scanDepth: 5,
       recursiveScanning: true,
       risuMatching: true,
     });
@@ -2022,7 +2063,8 @@ describe('normalizeCard - a RisuAI book', () => {
 
   it('knows a V2 card from RisuAI through the lift to V3', async () => {
     // RisuAI's PNG export is V2. This book names a depth and a budget but no
-    // recursion, which RisuAI reads as no settings at all: recursion on.
+    // recursion, which RisuAI reads as no settings at all (`convertCharbook`):
+    // its own depth and budget, recursion on.
     const v2 = {
       ...v2Card,
       data: {
@@ -2033,8 +2075,7 @@ describe('normalizeCard - a RisuAI book', () => {
     };
     expect(normalizeCard(v2).spec).toBe('v2');
     expect(normalizeCard(v2).loreSettings).toEqual({
-      scanDepth: 2,
-      tokenBudget: 512,
+      scanDepth: 5,
       recursiveScanning: true,
       risuMatching: true,
     });
@@ -2071,10 +2112,21 @@ describe('normalizeCard - a RisuAI book', () => {
     expect(normalizeCard(exported).loreSettings.risuMatching).toBeUndefined();
   });
 
-  it("leaves a book that asked for RisuAI's whole-word matching to exact matching", async () => {
-    const whole = normalizeCard(risuCard({ extensions: { risu_fullWordMatching: true } }));
-    expect(whole.loreSettings.risuMatching).toBeUndefined();
-    expect(whole.loreSettings.recursiveScanning).toBe(true);
+  it("keeps RisuAI's whole-word matching, read with the other three settings only, as RisuAI reads it", async () => {
+    const whole = normalizeCard(
+      risuCard({ scan_depth: 3, token_budget: 900, recursive_scanning: false, extensions: { risu_fullWordMatching: true } }),
+    );
+    expect(whole.loreSettings).toEqual({
+      scanDepth: 3,
+      tokenBudget: 900,
+      recursiveScanning: false,
+      risuMatching: true,
+      fullWordMatching: true,
+    });
+    // Without the three, RisuAI reads none of the four.
+    const alone = normalizeCard(risuCard({ extensions: { risu_fullWordMatching: true } }));
+    expect(alone.loreSettings.fullWordMatching).toBeUndefined();
+    expect(alone.loreSettings.scanDepth).toBe(5);
   });
 
   it('matches its keys without regard to spaces or case once in a prompt', async () => {

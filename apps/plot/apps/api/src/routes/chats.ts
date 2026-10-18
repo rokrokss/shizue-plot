@@ -20,6 +20,8 @@ import {
   computeVariables,
   DEFAULT_USER_NAME,
   getPreset,
+  characterName,
+  presetHasJailbreak,
   HYPA_V3_DEFAULTS,
   MAX_CHATS_PER_SUMMARY,
   MAX_QUERY_CHAT_COUNT,
@@ -1850,14 +1852,15 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const chatId = randomUUID();
     // In a work SillyTavern wrote, each greeting as ST shows it the first time
     // (`tavernGreetingMacro`): its macros expanded and what they wrote kept on
-    // its root. Otherwise `{{char}}` in a plot's own writing is the work, not one
-    // of its members; the clock is the reader's at the moment the chat opens, and
-    // there is no seed — an intro is expanded once.
+    // its root. Otherwise `{{char}}` is RisuAI's: a work of one member is that
+    // member, under its nickname, else its name — so renaming the work changes
+    // no greeting — and a work of several is the work; the clock is the reader's
+    // at the moment the chat opens, and there is no seed — an intro is expanded once.
     const tavern = await tavernGreetingMacro(deps, plot, persona, clock, chatId);
     const expanded = tavern ? greetings.slice(0, MAX_INTRO_ROOTS).map((greeting) => expandTavernStored(greeting, tavern)) : null;
     const intros = expanded
       ? expanded.map((greeting) => greeting.text.trim())
-      : introTexts(greetings, { char: plot.name, user: persona?.name ?? DEFAULT_USER_NAME, clock });
+      : introTexts(greetings, { char: await introChar(deps, plot), user: persona?.name ?? DEFAULT_USER_NAME, clock });
     const chosen = pickIntroIndex(intros.length, body['introIndex']);
 
     const [created] = await deps.db
@@ -2266,6 +2269,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
    * refresh scheduled once it commits writes it again with the message in or
    * out. Like an edit it takes no generation claim — a refresh racing it loses
    * on the revision.
+   *
+   * With `above: true` it is RisuAI's "disable above" (`disabled: 'allBefore'`,
+   * which leaves the message and every one before it out of what it sends, the
+   * greeting too): the message and every one before it on its branch, back to
+   * the greeting, are hidden — or shown again — at once.
    */
   app.put('/:id/messages/:messageId/hidden', async (c) => {
     const userId = c.get('userId');
@@ -2274,19 +2282,27 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     const body = await readJsonBody(c);
     const hidden = optionalBoolean(body, 'hidden');
     if (hidden === undefined) throw badRequest('invalid_request', 'hidden must be a boolean');
+    const above = optionalBoolean(body, 'above') === true;
 
     let changed = false;
     await deps.db.transaction(async (tx) => {
-      const [message] = await tx
-        .select({ hidden: messages.hiddenFromPrompt })
+      const rows = await tx
+        .select({ id: messages.id, parentId: messages.parentId, hidden: messages.hiddenFromPrompt })
         .from(messages)
-        .where(and(eq(messages.id, messageId), eq(messages.chatId, chat.id)))
-        .limit(1);
-      if (!message) throw notFound('Message not found');
+        .where(eq(messages.chatId, chat.id));
+      const byId = new Map(rows.map((row) => [row.id, row]));
+      if (!byId.has(messageId)) throw notFound('Message not found');
+      // The message, and with `above` every one before it on its branch.
+      const branch: typeof rows = [];
+      for (let at = byId.get(messageId); at; at = at.parentId ? byId.get(at.parentId) : undefined) {
+        branch.push(at);
+        if (!above) break;
+      }
       // Already so: nothing the memory read has changed.
-      if (message.hidden === hidden) return;
-      await tx.update(messages).set({ hiddenFromPrompt: hidden }).where(eq(messages.id, messageId));
-      await invalidateMemoryForEdit(tx, chat.id, messageId);
+      const flipped = branch.filter((row) => row.hidden !== hidden).map((row) => row.id);
+      if (flipped.length === 0) return;
+      await tx.update(messages).set({ hiddenFromPrompt: hidden }).where(inArray(messages.id, flipped));
+      await invalidateMemoryForEdit(tx, chat.id, flipped);
       changed = true;
     });
     // Either way the memory has a stretch to summarize again: the one a dropped
@@ -2762,6 +2778,11 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
         assets: readerModuleAssetsJson(row),
       })),
       toggles: chatToggles(modules, members, await presetToggles(deps, chat)),
+      /**
+       * Whether RisuAI's sidebar draws its jailbreak toggle for this chat's preset
+       * (`presetHasJailbreak`); its value is a global of the work's, as a toggle's.
+       */
+      jailbreak: presetHasJailbreak((await loadReaderPreset(deps, chat)) ?? getPreset(chat.preset)),
       /** RisuAI's `HideIconStore`: no message on this chat shows its sender's picture or name. */
       hideIcons: hidesChatIcons(modules, members),
     });
@@ -3475,6 +3496,12 @@ function introTexts(intros: readonly string[], macro: MacroContext): string[] {
  * written, before any macro (`getFirstMessage`). As written where no card ST
  * wrote has one.
  */
+/** RisuAI's `{{char}}` in a work's greeting: its one member's nickname or name, else the work's name. */
+async function introChar(deps: AppDeps, plot: Plot): Promise<string> {
+  const members = await loadMembers(deps.db, plot.id);
+  return members.length === 1 ? characterName(members[0]!) : plot.name;
+}
+
 async function regexGreetings(deps: AppDeps, plot: Plot, userName: string): Promise<string[]> {
   const intros = plot.intros.slice(0, MAX_INTRO_ROOTS);
   if (intros.length === 0) return intros;

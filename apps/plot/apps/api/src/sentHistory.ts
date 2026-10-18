@@ -29,6 +29,7 @@ import {
   type PromptBranch,
   type PromptCharacter,
   type PromptPlot,
+  type PromptPreset,
   type Variables,
 } from '@shizue/core';
 import { promptScriptJob, promptScriptsOf } from '@shizue/core/prompt-scripts';
@@ -38,7 +39,7 @@ import type { AppDeps } from './deps.js';
 import { loadMembers } from './hub.js';
 import { toPromptCharacters, toPromptPlot } from './plots.js';
 import { chatModulesOf } from './readerModules.js';
-import { chatDefaultVariables } from './readerPresets.js';
+import { chatDefaultVariables, loadReaderPreset } from './readerPresets.js';
 import { runPromptScriptJob } from './regexWorker.js';
 import { loadChatGlobalVariables } from './scriptState.js';
 
@@ -110,6 +111,8 @@ function swipesOf(all: readonly Message[], last: Message | undefined): PromptBra
 /** What the cards' prompt scripts are read with: the work, its roster, and what their macros read. */
 export interface ScriptedWork {
   plot: Pick<PromptPlot, 'name' | 'modules'>;
+  /** The chat's prompt preset, whose regex (RisuAI's `presetRegex`) runs ahead of the card's own. */
+  preset?: Pick<PromptPreset, 'regex'>;
   characters: readonly PromptCharacter[];
   userName: string;
   variables: Variables;
@@ -139,13 +142,16 @@ export async function withPromptScripts(
   // The chat's modules once, on the first member's list — RisuAI's `processScript`
   // runs the character's `customscript` and the modules' regex as one list, which
   // `<order N>` sorts together — read as the first member's, the work's stand-in.
+  // RisuAI's `processScript` runs the preset's regex, then the character's, then
+  // the modules', as one list.
   const moduleRegex = (work.plot.modules ?? []).flatMap((module) => (Array.isArray(module.regex) ? module.regex : []));
+  const presetRegex = work.preset?.regex ?? [];
   const cards = work.characters.map((member) => member.card.extensions ?? {});
-  if (moduleRegex.length > 0) {
+  if (moduleRegex.length > 0 || presetRegex.length > 0) {
     const first = cards[0] ?? {};
     const risu = first['risuai'] !== null && typeof first['risuai'] === 'object' ? (first['risuai'] as Record<string, unknown>) : {};
     const own = Array.isArray(risu['customScripts']) ? risu['customScripts'] : [];
-    cards[0] = { ...first, risuai: { ...risu, customScripts: [...own, ...moduleRegex] } };
+    cards[0] = { ...first, risuai: { ...risu, customScripts: [...presetRegex, ...own, ...moduleRegex] } };
   }
   const charOf = (index: number): string => {
     const member = work.characters[index] ?? work.characters[0];
@@ -184,8 +190,8 @@ export interface SentView extends ScriptedWork {
  * What a background reader of a chat — no request, no generation — reads its
  * turns' sent words with: the work with the chat's modules, the roster with the
  * members sent off the stage marked, the persona, the chat's variables at the
- * end of `path` and the work's globals — the roster as the card's scripts left
- * it, which is the roster itself.
+ * end of `path`, the work's globals and its reader preset's regex — the roster
+ * as the card's scripts left it, which is the roster itself.
  */
 export async function loadSentView(
   deps: AppDeps,
@@ -200,8 +206,11 @@ export async function loadSentView(
   const [persona] = chat.personaId
     ? await deps.db.select().from(personas).where(eq(personas.id, chat.personaId)).limit(1)
     : [];
+  // The chat's reader preset, for its regex: a built-in preset carries none.
+  const preset = await loadReaderPreset(deps, chat);
   return {
     plot: toPromptPlot(plot, chat, modules),
+    ...(preset?.regex ? { preset } : {}),
     characters: toPromptCharacters(members, new Set(chat.absentCharacterIds ?? [])),
     userName: persona?.name ?? DEFAULT_USER_NAME,
     personaText: persona?.description ?? '',

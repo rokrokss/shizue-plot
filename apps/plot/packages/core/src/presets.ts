@@ -57,7 +57,10 @@ export interface PromptItemChatML {
   name?: string;
 }
 
-/** RisuAI's `PromptItemCache`: a Claude cache point. Our provider caches by itself, so it sends nothing. */
+/**
+ * RisuAI's `PromptItemCache`: a Claude cache point. It sends nothing of its own:
+ * it marks `cachePoint` on the `depth` turns of its `role` (or any) before it.
+ */
 export interface PromptItemCache {
   type: 'cache';
   name?: string;
@@ -119,6 +122,35 @@ export type GroupOtherBotRole = 'user' | 'assistant' | 'system';
 /** RisuAI's default `groupTemplate`, which a preset's empty one falls back to. */
 export const DEFAULT_GROUP_TEMPLATE = "<{{char}}'s Message>\n{{slot}}\n</{{char}}'s Message>";
 
+/**
+ * RisuAI's `promptSettings`, the ones its `sendChat` reads. All but
+ * `trimStartNewChat` count only under a prompt template, as there.
+ * `assistantPrefill` is not among them: RisuAI saves it and never sends it, and
+ * `customChainOfThought` only matters while its chain-of-thought option is on,
+ * which shizue has not.
+ */
+export interface PromptSettings {
+  /** A chat item's turns go as system turns, `role: text` (`systemizeChat`) — but an item's `chatAsOriginalOnSystem`. */
+  sendChatAsSystem?: boolean;
+  /**
+   * Every turn of the chat in the group template (`groupTemplate`), as its
+   * `groupOtherBotRole`, and the greeting as `Name: text`.
+   */
+  sendName?: boolean;
+  /** No `[Start a new chat]` between the examples and the chat. Read with or without a template. */
+  trimStartNewChat?: boolean;
+  /** A system turn sent as written after what follows the chat (`postEverything`). */
+  postEndInnerFormat?: string;
+  /** A utility bot is sent this template rather than RisuAI's own for one. */
+  utilOverride?: boolean;
+  /**
+   * How many of the newest turns keep their `<Thoughts>` beside them (-1 every
+   * one). RisuAI sends what it keeps only as DeepSeek's reasoning; every turn
+   * loses the block from its text either way, so nothing here reads it.
+   */
+  maxThoughtTagDepth?: number;
+}
+
 /** A prompt preset: RisuAI's `botPreset`, the fields that make the prompt. */
 export interface PromptPreset {
   mainPrompt: string;
@@ -130,13 +162,88 @@ export interface PromptPreset {
   /** RisuAI's `groupTemplate`; '' for its default (`DEFAULT_GROUP_TEMPLATE`). */
   groupTemplate: string;
   groupOtherBotRole: GroupOtherBotRole;
+  /** RisuAI's `promptSettings` (`PromptSettings`). Absent: every one off. */
+  promptSettings?: PromptSettings;
+  /**
+   * RisuAI's preset regex (`presetRegex`, saved as the preset's `regex`): its
+   * scripts, in the card scripts' shape, run ahead of the card's own.
+   */
+  regex?: readonly unknown[];
+}
+
+/**
+ * A stored or imported `promptSettings`: the settings `sendChat` reads, each
+ * where it is the type RisuAI gives it; anything else is dropped.
+ */
+export function normalizePromptSettings(value: unknown): PromptSettings | undefined {
+  if (!isObject(value)) return undefined;
+  const flag = (key: keyof PromptSettings): Partial<PromptSettings> => (value[key] === true ? { [key]: true } : {});
+  const format = textOf(value['postEndInnerFormat']);
+  const depth = value['maxThoughtTagDepth'];
+  const settings: PromptSettings = {
+    ...flag('sendChatAsSystem'),
+    ...flag('sendName'),
+    ...flag('trimStartNewChat'),
+    ...flag('utilOverride'),
+    ...(format ? { postEndInnerFormat: format } : {}),
+    ...(typeof depth === 'number' && Number.isFinite(depth) && depth !== -1 ? { maxThoughtTagDepth: Math.trunc(depth) } : {}),
+  };
+  return Object.keys(settings).length > 0 ? settings : undefined;
+}
+
+/** One message of a ChatML item, as RisuAI's `parseChatML` reads it: its role, and its text before its macros. */
+export interface ChatMLMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+/**
+ * RisuAI's `parseChatML`: a text that starts with `<|im_start|>`, split on it;
+ * each part names its role with `<|im_sep|>`, a space or a line break after it
+ * (anything else is the user's), ends at `<|im_end|>`, and loses what its
+ * `<Thoughts>` held. Null for a text that is not ChatML — which RisuAI's own
+ * `sendChat` then fails on, and the assembler sends nothing for.
+ */
+export function parseChatML(data: string): ChatMLMessage[] | null {
+  const starter = '<|im_start|>';
+  const separator = '<|im_sep|>';
+  const ender = '<|im_end|>';
+  const trimmed = data.trim();
+  if (!trimmed.startsWith(starter)) return null;
+  return trimmed
+    .split(starter)
+    .filter((part) => part !== '')
+    .map((part) => {
+      let role: ChatMLMessage['role'] = 'user';
+      let text = part;
+      for (const name of ['user', 'system', 'assistant'] as const) {
+        if (text.startsWith(name + separator)) {
+          role = name;
+          text = text.slice(name.length + separator.length);
+          break;
+        }
+      }
+      if (text === part) {
+        for (const name of ['user', 'system', 'assistant'] as const) {
+          if (text.startsWith(`${name} `) || text.startsWith(`${name}\n`)) {
+            role = name;
+            text = text.slice(name.length + 1);
+            break;
+          }
+        }
+      }
+      text = text.trim();
+      if (text.endsWith(ender)) text = text.slice(0, text.length - ender.length);
+      return { role, content: text.replace(/<Thoughts>(.+)<\/Thoughts>/gms, '') };
+    });
 }
 
 /**
  * The built-in preset every chat runs unless its reader picked one of their
  * own: PocketRisu's "Default Prompt" (OAI2), the template its "new preset"
- * clones, with the OAI preset's jailbreak after everything — the text the
- * owner had sent on every reply since 2026-10-18 (`oai2.ts`). A card's system
+ * clones, with the OAI preset's jailbreak after everything (`oai2.ts`) — sent,
+ * like every jailbreak item, only while the jailbreak toggle is on
+ * (`AssemblePromptInput.jailbreak`), which RisuAI starts off. A card's system
  * prompt is not read under it, as RisuAI reads none under a template.
  */
 export const DEFAULT_PRESET: PromptPreset = {

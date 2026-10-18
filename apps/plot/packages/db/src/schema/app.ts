@@ -250,6 +250,11 @@ export const readerPresets = pgTable(
     // RisuAI's `templateDefaultVariables`, in its `key=value` lines: what a chat on
     // this preset reads for a variable nothing set and its card has no default for.
     defaultVariables: text('default_variables').notNull().default(''),
+    // RisuAI's `promptSettings` (`sendName`, `sendChatAsSystem`, …); null for every one off.
+    promptSettings: jsonb('prompt_settings').$type<object>(),
+    // RisuAI's preset regex (`presetRegex`, saved as the preset's `regex`): scripts
+    // in the card scripts' shape, run ahead of the card's own; null for none.
+    regex: jsonb('regex').$type<unknown[]>(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

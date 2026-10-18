@@ -4,6 +4,7 @@ import {
   groupToggles,
   isEmptyGroup,
   isToggleGroup,
+  JAILBREAK_TOGGLE_VARIABLE,
   parseToggleSyntax,
   toggleVariable,
   type ToggleEntry,
@@ -22,10 +23,13 @@ import { Checkbox, Select, TextArea, TextInput } from './ui';
  * the chosen option's index, a field its text; unset reads as nothing. A field
  * is saved when it is left, as RisuAI saves it on change. Under them, RisuAI's
  * "Local Toggles" switch (`local`): while on, what is set here stays this
- * chat's. Nothing is drawn where nothing is declared.
+ * chat's. Above them, where the chat's preset has a jailbreak (`jailbreak`),
+ * RisuAI's jailbreak toggle, off until it is turned on, kept as the toggles are.
+ * Nothing is drawn where nothing is declared.
  */
 export function ModuleToggles({
   text,
+  jailbreak = false,
   values,
   onSet,
   local = false,
@@ -33,6 +37,8 @@ export function ModuleToggles({
   onLocal,
 }: {
   text: string;
+  /** The chat's preset has a jailbreak, which RisuAI's sidebar draws its toggle for. */
+  jailbreak?: boolean;
   values: Readonly<Record<string, string>> | undefined;
   onSet: (variable: string, value: string) => Promise<void>;
   /** RisuAI's `useLocallySetGlobalVariables` for this chat. */
@@ -42,7 +48,7 @@ export function ModuleToggles({
 }) {
   const t = useTranslations('chat');
   const entries = useMemo(() => groupToggles(parseToggleSyntax(text)), [text]);
-  if (entries.length === 0) return null;
+  if (entries.length === 0 && !jailbreak) return null;
 
   /** RisuAI's `getGlobalChatVarNH`: an unset value reads as nothing. */
   const valueOf = (key: string): string => {
@@ -123,7 +129,19 @@ export function ModuleToggles({
   return (
     <section data-testid="chat-toggles" className="space-y-3 border-t border-line pt-5">
       <h2 className="text-xs font-medium text-muted">{t('toggles')}</h2>
-      <div className="space-y-2">{draw(entries)}</div>
+      {jailbreak ? (
+        <div data-testid="jailbreak-toggle" className="space-y-1">
+          <Checkbox
+            label={t('jailbreakToggle')}
+            checked={values?.[JAILBREAK_TOGGLE_VARIABLE] === '1'}
+            onChange={() =>
+              void onSet(JAILBREAK_TOGGLE_VARIABLE, values?.[JAILBREAK_TOGGLE_VARIABLE] === '1' ? '0' : '1')
+            }
+          />
+          <p className="text-xs text-muted">{t('jailbreakToggleHint')}</p>
+        </div>
+      ) : null}
+      {entries.length > 0 ? <div className="space-y-2">{draw(entries)}</div> : null}
       <p className="text-xs text-muted">{t('togglesHint')}</p>
       {onLocal ? (
         <div data-testid="local-toggles" className="space-y-1">

@@ -13,7 +13,9 @@
  * (`moduleIntergration`, the namespaces whose library modules the chat turns
  * on — `moduleIntegrationNames`) and its default variables
  * (`templateDefaultVariables`, what a chat on it reads for a variable nothing
- * set — `presetDefaultVariables`).
+ * set — `presetDefaultVariables`) — and two more its `sendChat` reads: its
+ * prompt settings (`promptSettings`, `normalizePromptSettings`) and its regex
+ * (`presetRegex`, saved as `regex`: scripts run ahead of the card's own).
  *
  * An import keeps what the file's app sends: a RisuAI preset's template whole,
  * or its three texts and order; a SillyTavern preset's Main and Auxiliary
@@ -27,11 +29,13 @@ import { decodeMsgpack } from './msgpack.js';
 import {
   groupOtherBotRoleOf,
   normalizeFormatingOrder,
+  normalizePromptSettings,
   normalizePromptTemplate,
   RISU_DEFAULT_FORMATING_ORDER,
   type FormatOrderItem,
   type GroupOtherBotRole,
   type PromptPreset,
+  type PromptSettings,
   type PromptTemplateItem,
 } from './presets.js';
 import { parseDefaultVariables, type Variables } from './variables.js';
@@ -49,6 +53,19 @@ export const READER_PRESET_TEXT_MAX = 200_000;
 export const READER_PRESET_TEMPLATE_ITEMS_MAX = 500;
 /** Characters a preset's module integration may hold — a comma list of namespaces. */
 export const READER_PRESET_INTEGRATION_MAX = 2_000;
+/** Scripts a preset's regex may hold. */
+export const READER_PRESET_REGEX_MAX = 1_000;
+
+/**
+ * A stored or imported preset regex (RisuAI's `presetRegex`): its scripts as
+ * RisuAI saves them, each a plain object — what runs them reads only the ones
+ * it can (`promptScriptsOf`). Anything but an array is none.
+ */
+export function normalizePresetRegex(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter((script): script is Record<string, unknown> => script !== null && typeof script === 'object' && !Array.isArray(script))
+    : [];
+}
 
 /** A reader preset as it is stored (`reader_presets`), the prompt's part of it. */
 export interface StoredReaderPrompt {
@@ -59,6 +76,8 @@ export interface StoredReaderPrompt {
   promptTemplate: unknown;
   groupTemplate: string;
   groupOtherBotRole: string;
+  promptSettings: unknown;
+  regex: unknown;
 }
 
 /**
@@ -76,7 +95,15 @@ export function readerPromptPreset(stored: StoredReaderPrompt): PromptPreset {
     promptTemplate: normalizePromptTemplate(stored.promptTemplate),
     groupTemplate: stored.groupTemplate,
     groupOtherBotRole: groupOtherBotRoleOf(stored.groupOtherBotRole),
+    ...withSettings(stored.promptSettings, stored.regex),
   };
+}
+
+/** A preset's prompt settings and regex, each where it has any. */
+function withSettings(settings: unknown, regex: unknown): Pick<PromptPreset, 'promptSettings' | 'regex'> {
+  const promptSettings = normalizePromptSettings(settings);
+  const scripts = normalizePresetRegex(regex);
+  return { ...(promptSettings ? { promptSettings } : {}), ...(scripts.length > 0 ? { regex: scripts } : {}) };
 }
 
 /**
@@ -145,11 +172,15 @@ export interface ReaderPresetImport {
   moduleIntegration: string;
   /** RisuAI's `templateDefaultVariables`, its `key=value` lines as written — '' for a file with none. */
   defaultVariables: string;
+  /** RisuAI's `promptSettings`, the ones its `sendChat` reads — null for a file with none. */
+  promptSettings: PromptSettings | null;
+  /** RisuAI's preset regex (the preset's `regex`), its scripts as written — [] for a file with none. */
+  regex: Record<string, unknown>[];
   /** The prompts taken, in the file's order, and where each went. */
   imported: ReaderPresetPart[];
-  /** Prompt texts in use that are not sent — ChatML and chain-of-thought items, others of SillyTavern's — by the names the file gives them ('' for none). */
+  /** Prompt texts in use that are not sent — chain-of-thought items, others of SillyTavern's — by the names the file gives them ('' for none). */
   ignoredPrompts: string[];
-  /** Whether the file held anything more — model, sampling, prompt settings, its regex and the like. Always ignored. */
+  /** Whether the file held anything more — model, sampling and the like. Always ignored. */
   ignoredSettings: boolean;
 }
 
@@ -285,6 +316,8 @@ const RISU_READ_KEYS = new Set([
   'customPromptTemplateToggle',
   'moduleIntergration',
   'templateDefaultVariables',
+  'promptSettings',
+  'regex',
 ]);
 
 /** A template item's kind of text, as the import's notice names it. */
@@ -300,12 +333,13 @@ const partKind = (item: PromptTemplateItem): ReaderPresetPart['kind'] | null => 
  * order, the chat's stretches, the inner formats; RisuAI reads none of the
  * three texts then, and neither do we, though they are kept. Without one the
  * three texts are the prompt, in its `formatingOrder` (RisuAI's default where
- * it carries none). A ChatML or chain-of-thought item is kept but not sent yet,
- * and the notice names it.
+ * it carries none). A ChatML item is sent as RisuAI sends it; a chain-of-thought
+ * item is kept but not sent — RisuAI's chain-of-thought option is off, and
+ * shizue has none — and the notice names it.
  *
- * RisuAI sends a jailbreak only while its jailbreak toggle is on. That toggle is
- * a setting of the RisuAI install, never saved in a preset, so a file cannot say
- * it was off: its jailbreak text is sent, and the notice names it.
+ * RisuAI sends a jailbreak only while its jailbreak toggle is on, a setting of
+ * the RisuAI install never saved in a preset: here it is the chat's toggle
+ * (`JAILBREAK_TOGGLE_VARIABLE`), off until the reader turns it on.
  */
 function fromRisuPreset(preset: Json, fileName: string): ReaderPresetImport {
   const promptTemplate = normalizePromptTemplate(preset['promptTemplate']);
@@ -323,6 +357,8 @@ function fromRisuPreset(preset: Json, fileName: string): ReaderPresetImport {
     toggles: textOf(preset['customPromptTemplateToggle']),
     moduleIntegration: textOf(preset['moduleIntergration']),
     defaultVariables: textOf(preset['templateDefaultVariables']),
+    promptSettings: normalizePromptSettings(preset['promptSettings']) ?? null,
+    regex: normalizePresetRegex(preset['regex']).slice(0, READER_PRESET_REGEX_MAX),
     ignoredSettings: Object.keys(preset).some((key) => !RISU_READ_KEYS.has(key)),
   };
 
@@ -339,8 +375,12 @@ function fromRisuPreset(preset: Json, fileName: string): ReaderPresetImport {
   const imported: ReaderPresetPart[] = [];
   const ignoredPrompts: string[] = [];
   for (const item of promptTemplate) {
-    if (item.type === 'cot' || item.type === 'chatML') {
+    if (item.type === 'cot') {
       if (item.text.trim()) ignoredPrompts.push(item.name ?? '');
+      continue;
+    }
+    if (item.type === 'chatML') {
+      if (item.text.trim()) imported.push({ kind: 'normal', name: item.name ?? '', into: 'template' });
       continue;
     }
     const kind = partKind(item);
@@ -424,6 +464,8 @@ function fromSillyTavernPreset(preset: Json, fileName: string): ReaderPresetImpo
     toggles: '',
     moduleIntegration: '',
     defaultVariables: '',
+    promptSettings: null,
+    regex: [],
     imported,
     ignoredPrompts,
     ignoredSettings: true,

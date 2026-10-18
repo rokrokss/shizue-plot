@@ -215,7 +215,8 @@ describe('assemblePrompt - a group turn', () => {
     // Without a template the card's system prompt is the main prompt; {{original}} brings the preset's back.
     const asSeiya = group({ speaker: 0 });
     expect(asSeiya.system.startsWith('세이야 카드의 지시. MAIN')).toBe(true);
-    expect(texts(asSeiya)).toContain('[세이의 말투를 지킨다.]');
+    // RisuAI reads a group speaker's {{char}} as its name, not its nickname.
+    expect(texts(asSeiya)).toContain('[세이야의 말투를 지킨다.]');
     const asKai = group({ speaker: 1 });
     expect(asKai.system.startsWith('카이 카드의 지시만 따른다.')).toBe(true);
     expect(asKai.system).not.toContain('세이야 카드의 지시');
@@ -224,7 +225,7 @@ describe('assemblePrompt - a group turn', () => {
     // Under a template RisuAI reads no card system prompt; the global-note item still takes the card's.
     const templated = group({ speaker: 0, preset: DEFAULT_PRESET });
     expect(templated.system).not.toContain('세이야 카드의 지시');
-    expect(templated.system).toContain('[세이의 말투를 지킨다.]');
+    expect(templated.system).toContain('[세이야의 말투를 지킨다.]');
   });
 
   it("sends the speaker's own replies plain and everyone else's in the group template", () => {

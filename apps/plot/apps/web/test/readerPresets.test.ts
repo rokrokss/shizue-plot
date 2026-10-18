@@ -35,6 +35,8 @@ const preset = (id: string, name: string): ReaderPreset => ({
   toggles: '',
   moduleIntegration: '',
   defaultVariables: '',
+  promptSettings: null,
+  regex: [],
   createdAt: '2026-10-15T00:00:00.000Z',
   updatedAt: '2026-10-15T00:00:00.000Z',
 });
@@ -193,6 +195,8 @@ describe('the stacked field', () => {
       toggles: '',
       moduleIntegration: '',
       defaultVariables: '',
+      promptSettings: null,
+      regex: null,
     });
     expect(lists).toEqual([[created]]);
     // The draft was a copy: the built-in default every other chat runs is unchanged.

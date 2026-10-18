@@ -29,12 +29,12 @@ interface ScanText {
  * removed. Only the space character goes, not tabs or line breaks, and a comment
  * ends at its line, as there.
  */
-const risuFold = (text: string): string =>
+const risuFoldWords = (text: string): string =>
   text
     .toLowerCase()
     .replace(/\{\{\/\/(.+?)\}\}/g, '')
-    .replace(/\{\{comment:(.+?)\}\}/g, '')
-    .replace(/ /g, '');
+    .replace(/\{\{comment:(.+?)\}\}/g, '');
+const risuFold = (text: string): string => risuFoldWords(text).replace(/ /g, '');
 
 /** Compiled key patterns, by flags and source: a book's keys are tested on every pass of every turn. */
 const compiledKeys = new Map<string, RE2JS | null>();
@@ -442,6 +442,13 @@ export interface ActivateLoreInput {
   maxRecursionSteps?: number;
   /** The book's `LoreSettings.risuMatching`: plain keys matched as RisuAI does. */
   risuMatching?: boolean;
+  /** The book's `LoreSettings.fullWordMatching`: plain keys matched as whole words, as RisuAI's option does. */
+  fullWordMatching?: boolean;
+  /**
+   * The intro the branch opened on, for RisuAI's `@@is_greeting`: -1 the first,
+   * k the k-th after it (RisuAI's `fmIndex`). Absent: -1, RisuAI's default.
+   */
+  openingIndex?: number;
   /** Absent: a branch with no records, as long as `history`. */
   timed?: LoreTimedState;
   /** Probability rolls and group draws. Returns [0, 1). */
@@ -582,15 +589,24 @@ function prepare(input: ActivateLoreInput, historyLength: number): Prepared {
  * recursion activates without its text being scanned.
  *
  * The budget comes after all of that, as RisuAI spends it and as the V3 spec
- * describes `insertion_order`: the highest insertionOrder is paid for first, and
- * an entry that does not fit is skipped while the ones after it still get their
- * turn — an entry that ignores the budget (`ignoreBudget`) is never skipped.
- * Always-on entries take their place in that order like any other, and an
- * entry the budget leaves out has still done its recursive scanning — the budget
- * decides what is sent, not what the scan saw. The entries that made it go into
+ * describes `insertion_order`: the highest priority — RisuAI's `@@priority`, else
+ * the insertionOrder — is paid for first, and an entry that does not fit is
+ * skipped while the ones after it still get their turn — an entry that ignores
+ * the budget (`ignoreBudget`) is never skipped. Always-on entries take their
+ * place in that order like any other, and an entry the budget leaves out has
+ * still done its recursive scanning — the budget decides what is sent, not what
+ * the scan saw. Ties in the budget go by the order the entries activated in —
+ * pass by pass, the book's order within one. The entries that made it go into
  * the prompt lowest insertionOrder first, the order the spec and RisuAI both
- * write them in. Ties go by the order the entries activated in — the book's,
- * within one pass — in the budget and in the prompt alike.
+ * write them in — entries of one insertionOrder in the reverse of the budget's
+ * order, as RisuAI's sort-then-reverse leaves them.
+ *
+ * RisuAI's own conditions hold besides (`LoreEntry.risu`): `@@activate_only_every`
+ * against the chat's length, `@@is_greeting` against the intro the branch opened
+ * on (`openingIndex`), and whole-word matching (`fullWordMatching`, `@@match_full_word`)
+ * where a book or an entry asks for it; an entry kept on by its sticky window
+ * passes them, as RisuAI's forced state does. An entry that recurses on its own
+ * (`@@recursive`) feeds the next pass in a book that does not.
  *
  * Timed effects (SillyTavern's, `timedStatus`): a sticky entry stays active for a
  * while after it triggers, without a scan and without counting as a new
@@ -637,17 +653,28 @@ function activateBook(entries: LoreEntry[], input: ActivateLoreInput): LoreActiv
   } = input;
   const prepared = prepare(input, history.length);
   const { keyOf, isTavern } = prepared;
+  const chatLength = input.timed?.chatLength ?? history.length;
+  const opening = input.openingIndex ?? -1;
+  /** RisuAI's own conditions: `@@activate_only_every N` and `@@is_greeting N`. */
+  const risuAllows = (entry: LoreEntry): boolean => {
+    const { every, greeting } = entry.risu ?? {};
+    if (every !== undefined && chatLength % every !== 0) return false;
+    return greeting === undefined || opening + 1 === greeting;
+  };
+  // A RisuAI entry may recurse in a book that does not (`@@recursive`).
+  const recursing = recursiveScanning || entries.some((entry) => entry.risu?.recursive);
 
   const sticky: LoreEntry[] = [];
   let pending: LoreEntry[] = [];
   for (const entry of entries) {
     if (!prepared.considered(entry)) continue;
     const status = prepared.status(entry);
+    // Kept on (`@@keep_activate_after_match`) wins over RisuAI's conditions, as its forced state does.
     if (status.sticky) {
       sticky.push(entry);
       continue;
     }
-    if (status.cooldown || status.delay) continue;
+    if (status.cooldown || status.delay || !risuAllows(entry)) continue;
     pending.push(entry);
   }
 
@@ -685,10 +712,32 @@ function activateBook(entries: LoreEntry[], input: ActivateLoreInput): LoreActiv
     }
     return scan;
   };
-  const matcherFor = (entry: LoreEntry): ((key: string) => boolean) =>
-    isTavern(entry)
-      ? tavernMatcher(scanFor(entry), entry, input, prepared.keyText(entry))
-      : keyMatcher(scanFor(entry), entry.caseSensitive, entry.useRegex, risuMatching);
+  // RisuAI's whole-word matching splits each message — and each text recursion
+  // added — on spaces, lowercased and its comments out, and looks for the key
+  // among the words. Per depth, per pass, as the scan texts are.
+  let passWords = new Map<string, Set<string>>();
+  const wordsFor = (entry: LoreEntry): Set<string> => {
+    const depth = entry.scanDepth ?? input.scanDepth;
+    const greeted = withGreeting(entry);
+    const key = `${depth}:${greeted}:${entry.matchSources?.join(',') ?? ''}`;
+    let words = passWords.get(key);
+    if (words === undefined) {
+      const messages = depth > 0 ? (greeted ? history : afterGreeting).slice(-depth) : [];
+      words = new Set(
+        [...messages, ...prepared.sources(entry), ...recursion].flatMap((text) => risuFoldWords(text).split(' ')),
+      );
+      passWords.set(key, words);
+    }
+    return words;
+  };
+  const matcherFor = (entry: LoreEntry): ((key: string) => boolean) => {
+    if (isTavern(entry)) return tavernMatcher(scanFor(entry), entry, input, prepared.keyText(entry));
+    if (!entry.useRegex && (entry.risu?.fullWord ?? input.fullWordMatching ?? false)) {
+      const words = wordsFor(entry);
+      return (key) => words.has(key.trim().toLowerCase());
+    }
+    return keyMatcher(scanFor(entry), entry.caseSensitive, entry.useRegex, risuMatching);
+  };
   const aliasesOf = (entry: LoreEntry): AliasHits | undefined => aliasHits(scanFor(entry), input.aliases?.(entry));
   const passes = (entry: LoreEntry): boolean =>
     entry.probability === undefined || entry.probability >= 100 || random() * 100 < entry.probability;
@@ -698,6 +747,8 @@ function activateBook(entries: LoreEntry[], input: ActivateLoreInput): LoreActiv
   const active: LoreEntry[] = [];
   const via = new Map<LoreEntry, LoreActivationVia>();
   const held = new Set<string>(sticky.flatMap(groupsOf));
+  /** The pass each entry activated on, for the order RisuAI's budget reads them in. */
+  const passOf = new Map<LoreEntry, number>();
 
   // SillyTavern's delay levels, every entry's counted as ST counts them — the
   // first is open from the first recursive pass on, and each next one opens
@@ -714,7 +765,7 @@ function activateBook(entries: LoreEntry[], input: ActivateLoreInput): LoreActiv
     const eligible = pending.filter((entry) => {
       const delayed = entry.delayUntilRecursion ?? 0;
       if (delayed > 0 && (!recursive || delayed > level)) return false;
-      return !(recursive && recursiveScanning && entry.excludeRecursion);
+      return !(recursive && recursing && entry.excludeRecursion);
     });
     const matched = eligible
       .filter((entry) => entry.constant || keysMatch(entry, matcherFor(entry), aliasesOf(entry)))
@@ -747,9 +798,12 @@ function activateBook(entries: LoreEntry[], input: ActivateLoreInput): LoreActiv
       for (const label of groupsOf(entry)) held.add(label);
     }
     active.push(...activated);
+    for (const entry of activated) passOf.set(entry, pass);
 
-    const feeding = activated.filter((entry) => !entry.preventRecursion);
-    let next = recursiveScanning && feeding.length > 0 && pending.length > 0;
+    const feeding = activated.filter((entry) =>
+      recursiveScanning ? !entry.preventRecursion : entry.risu?.recursive === true,
+    );
+    let next = feeding.length > 0 && pending.length > 0;
     if (!next && levels.length > 0) {
       level = levels.shift()!;
       next = pending.length > 0;
@@ -757,24 +811,36 @@ function activateBook(entries: LoreEntry[], input: ActivateLoreInput): LoreActiv
     if (!next) break;
     recursion = [...recursion, ...feeding.map(textOf)];
     passScans = new Map();
+    passWords = new Map();
   }
 
-  // Highest insertionOrder first; a stable sort, so ties keep the activation order.
-  const kept = new Set<LoreEntry>();
+  // RisuAI's budget (`loadLoreBookV3Prompt`): the entries in the order they
+  // activated — pass by pass, each pass in the book's order — paid for highest
+  // priority first (`@@priority`, else the insertion order), a stable sort, so
+  // ties keep that order; one that does not fit is skipped.
+  const bookIndex = new Map(entries.map((entry, at) => [entry, at] as const));
+  const activation = [...active].sort(
+    (a, b) => (passOf.get(a) ?? 0) - (passOf.get(b) ?? 0) || (bookIndex.get(a) ?? 0) - (bookIndex.get(b) ?? 0),
+  );
+  const priorityOf = (entry: LoreEntry): number => entry.risu?.priority ?? entry.insertionOrder;
+  const kept: LoreEntry[] = [];
   let used = 0;
-  for (const entry of [...active].sort((a, b) => b.insertionOrder - a.insertionOrder)) {
+  for (const entry of activation.sort((a, b) => priorityOf(b) - priorityOf(a))) {
     const cost = countTokens(textOf(entry));
     if (!entry.ignoreBudget && used + cost > budgetTokens) continue;
     used += cost;
-    kept.add(entry);
+    kept.push(entry);
   }
-
-  const selected = active.filter((entry) => kept.has(entry));
-  for (const entry of active) if (!kept.has(entry)) via.delete(entry);
+  const keptSet = new Set(kept);
+  for (const entry of active) if (!keptSet.has(entry)) via.delete(entry);
+  // RisuAI then sorts what it kept highest insertion order first and turns the
+  // list round: lowest first, and entries of one order in the reverse of the
+  // order the budget paid for them.
+  const selected = kept.sort((a, b) => b.insertionOrder - a.insertionOrder).reverse();
   // Only what reached the prompt is recorded: an entry the budget cut never had
   // an effect to keep.
   const triggered = new Set(selected.filter((entry) => via.get(entry) !== 'sticky').map(keyOf));
-  return { entries: selected.sort(byOrder), triggered: [...triggered], via };
+  return { entries: selected, triggered: [...triggered], via };
 }
 
 /* ------------------------------------------------- SillyTavern's own scan */
