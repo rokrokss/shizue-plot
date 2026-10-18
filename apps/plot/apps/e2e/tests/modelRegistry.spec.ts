@@ -90,8 +90,7 @@ test('a Gemini 3.8 Flash preset from the registry answers a chat turn', async ({
     expect(received[0]!.url).toBe('/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse');
     expect(received[0]!.headers['x-goog-api-key']).toBe(KEY);
     expect(received[0]!.body['generationConfig']).toEqual({ maxOutputTokens: 8192, thinkingConfig: { thinkingLevel: 'low', includeThoughts: true }, responseLogprobs: false });
-    // RisuAI's BLOCK_NONE on every category, which a new Gemini preset starts with.
-    expect((received[0]!.body['safetySettings'] as { threshold: string }[]).map((entry) => entry.threshold)).toEqual(Array(5).fill('BLOCK_NONE'));
+    expect(received[0]!.body).not.toHaveProperty('safetySettings');
   } finally {
     await page.request.put(`${origin}/api/model-binding`, { headers, data: binding });
     const after = (await (await page.request.get(`${origin}/api/model-presets`)).json()) as { id: string; builtIn?: boolean }[];

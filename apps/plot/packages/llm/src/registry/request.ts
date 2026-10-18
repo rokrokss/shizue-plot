@@ -1,4 +1,3 @@
-import { GEMINI_SAFETY } from '../geminiSafety.js';
 import { setPath } from '../params.js';
 import type { RegistryFieldSchema, ResolvedModelProfileSnapshot } from './types.js';
 import { isMappingPath } from './validate.js';
@@ -119,33 +118,16 @@ export function seedValues(snapshot: Pick<ResolvedModelProfileSnapshot, 'schema'
 }
 
 /**
- * What a preset made here starts with: PocketRisu's seed (`seedValues`),
+ * What a preset made here starts with: PocketRisu's seed (`seedValues`), and
  * Gemini's thoughts asked for (`includeThoughts`, which PocketRisu leaves off)
  * — this app keeps a reply's thinking folded above it, and a model thinking
- * aloud keeps its stream from going quiet — and RisuAI's safety settings
- * (`withSafetyDefault`). The owner can change either.
+ * aloud keeps its stream from going quiet. The owner can turn it off.
  */
 export function newPresetValues(snapshot: Pick<ResolvedModelProfileSnapshot, 'schema'>): Record<string, unknown> {
   const values = seedValues(snapshot);
   const thoughts = snapshot.schema.find((field) => field.key === 'includeThoughts' && field.type === 'boolean' && editable(field));
   if (thoughts) values[thoughts.key] = true;
-  return withSafetyDefault(snapshot, values);
-}
-
-/**
- * `values` with RisuAI's BLOCK_NONE on every category (`GEMINI_SAFETY`) where
- * the profile has a `safetySettings` field and the values set none — a new
- * preset, or one moved onto such a profile. PocketRisu sends no safety
- * settings, and Gemini then blocks at Google's defaults; the owner chose
- * RisuAI's (2026-10-19). A value the owner set stays.
- */
-export function withSafetyDefault(
-  snapshot: Pick<ResolvedModelProfileSnapshot, 'schema'>,
-  values: Record<string, unknown>,
-): Record<string, unknown> {
-  const field = snapshot.schema.find((entry) => entry.key === 'safetySettings' && entry.type === 'json' && editable(entry));
-  if (!field || values[field.key] !== undefined) return values;
-  return { ...values, [field.key]: structuredClone(GEMINI_SAFETY) };
+  return values;
 }
 
 /**

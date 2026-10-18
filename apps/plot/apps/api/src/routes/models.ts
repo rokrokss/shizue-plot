@@ -22,7 +22,6 @@ import {
   validateCredential,
   VERBOSITIES,
   wireModelId,
-  withSafetyDefault,
   type ModelCapabilities,
   type ModelCredential,
   type ModelFormat,
@@ -346,8 +345,6 @@ async function profileFields(deps: AppDeps, userId: string, body: Record<string,
     snapshot = columns.profileSnapshot;
     sourceProfile = columns.sourceProfile;
     values = migrateValues(replaced ? kept : values, snapshot.schema).values;
-    // Moved onto a Gemini profile, it starts with RisuAI's safety settings as a new preset does.
-    if (replaced) values = withSafetyDefault(snapshot, values);
   }
   const nameValue = body['name'] ?? current.name;
   if (typeof nameValue !== 'string' || !nameValue.trim()) throw badRequest('invalid_request', 'name must not be empty');

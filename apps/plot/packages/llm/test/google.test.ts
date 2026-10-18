@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { generateContentBody, geminiContents } from '../src/formats/google.js';
-import { GEMINI_SAFETY } from '../src/geminiSafety.js';
+import { GEMINI_SAFETY, generateContentBody, geminiContents } from '../src/formats/google.js';
 import { adapterFor, listModels, type ModelCredential, type PresetConfig } from '../src/formats/index.js';
 import { IDLE_TIMEOUT_MS } from '../src/stream.js';
 import { LLMError } from '../src/types.js';

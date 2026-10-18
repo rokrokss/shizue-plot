@@ -1,4 +1,3 @@
-import { GEMINI_SAFETY } from '../geminiSafety.js';
 import { errorMessageOf, joinUrl, providerFailure, providerFetch, providerHttpError, redact } from '../http.js';
 import { applyParameters, withPresetParams, type ParameterPlaces } from '../params.js';
 import { addCallerStops, profileBody, wireModelId } from '../registry/request.js';
@@ -18,6 +17,15 @@ export const GEMINI_PLACES: ParameterPlaces = {
   thinkingTokens: 'generationConfig.thinkingConfig.thinkingBudget',
   reasoningEffort: 'generationConfig.thinkingConfig.thinkingLevel',
 };
+
+/** RisuAI's `uncensoredCatagory`: every category the API filters on, at BLOCK_NONE. */
+export const GEMINI_SAFETY = [
+  'HARM_CATEGORY_SEXUALLY_EXPLICIT',
+  'HARM_CATEGORY_HATE_SPEECH',
+  'HARM_CATEGORY_HARASSMENT',
+  'HARM_CATEGORY_DANGEROUS_CONTENT',
+  'HARM_CATEGORY_CIVIC_INTEGRITY',
+].map((category) => ({ category, threshold: 'BLOCK_NONE' }));
 
 type Part = { text: string } | { inlineData: { mimeType: string; data: string } };
 interface Content {

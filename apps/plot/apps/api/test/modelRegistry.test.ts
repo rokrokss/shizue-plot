@@ -7,7 +7,7 @@
  * are answered by stand-ins.
  */
 import { messages, modelPresets } from '@shizue/db';
-import { bundledCatalog, GEMINI_SAFETY } from '@shizue/llm';
+import { bundledCatalog } from '@shizue/llm';
 import { eq } from 'drizzle-orm';
 import type { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
@@ -94,7 +94,7 @@ describe('the model registry', () => {
     }
   });
 
-  it("runs a chat's turn on the profile's request — its own cap, RisuAI's safety settings — and answers", async () => {
+  it("runs a chat's turn on the profile's request — its own cap, no safety settings — and answers", async () => {
     const app = h.app();
     const { preset } = await flashPreset(app);
     await h.call(app, 'PATCH', `/api/model-presets/${preset.id}`, { userValues: { ...preset.userValues, thinkingLevel: 'high' } });
@@ -109,8 +109,7 @@ describe('the model registry', () => {
     expect(sent.headers['x-goog-api-key']).toBe(KEY);
     // A short plot asks for 600; the profile's 8192 is the wire's, for thinking and the reply together.
     expect(sent.body!['generationConfig']).toEqual({ maxOutputTokens: 8192, thinkingConfig: { thinkingLevel: 'high', includeThoughts: true }, responseLogprobs: false });
-    // The new preset started with RisuAI's BLOCK_NONE on every category, where PocketRisu sends none.
-    expect(sent.body!['safetySettings']).toEqual(GEMINI_SAFETY);
+    expect(sent.body).not.toHaveProperty('safetySettings');
     const stored = await h.db.select().from(messages).where(eq(messages.chatId, chatId));
     expect(stored.map((message) => message.content)).toContain('누구세요?');
   });

@@ -10,8 +10,7 @@ import { setPath } from '../src/params.js';
 import { bundledCatalog, firstProfileOf, offeredSnapshot, profileEntries, registryBaseOf, resolveSnapshot, validateCatalog } from '../src/registry/index.js';
 import { legacyProfile } from '../src/registry/legacy.js';
 import { fetchRegistry } from '../src/registry/remote.js';
-import { GEMINI_SAFETY } from '../src/geminiSafety.js';
-import { migrateValues, newPresetValues, parseProfileValues, profileOutputTokens, withSafetyDefault } from '../src/registry/request.js';
+import { migrateValues, parseProfileValues, profileOutputTokens } from '../src/registry/request.js';
 import { retryingAdapter } from '../src/retry.js';
 import { LLMError, type LLMAdapter, type StreamDelta, type StreamDone } from '../src/types.js';
 import { drain, REQUEST } from './helpers.js';
@@ -200,23 +199,5 @@ describe('presets from before the registry', () => {
     const argon = legacyProfile(catalog, { provider: 'google', model: 'gemini-4-argon', params: { reasoningEffort: 'minimal', temperature: 1 } })!;
     // Argon takes neither `minimal` nor a temperature.
     expect(argon.dropped.sort()).toEqual(['reasoningEffort', 'temperature']);
-  });
-});
-
-describe("Gemini's safety settings", () => {
-  it("start a new Gemini preset at RisuAI's BLOCK_NONE, and leave others and set values alone", () => {
-    const flash = offeredSnapshot(bundledCatalog(), 'google:gemini-38-flash')!.snapshot;
-    expect(newPresetValues(flash)['safetySettings']).toEqual(GEMINI_SAFETY);
-    // The default is a copy: a preset that edits its own leaves the constant as it was.
-    expect(newPresetValues(flash)['safetySettings']).not.toBe(GEMINI_SAFETY);
-    const opus = offeredSnapshot(bundledCatalog(), 'anthropic:opus-55')!.snapshot;
-    expect(newPresetValues(opus)).not.toHaveProperty('safetySettings');
-    const own = [{ category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' }];
-    expect(withSafetyDefault(flash, { safetySettings: own })['safetySettings']).toBe(own);
-  });
-
-  it('go into a Gemini preset converted from before the registry', () => {
-    const converted = legacyProfile(bundledCatalog(), { provider: 'google', model: 'gemini-3.8-flash', params: {} })!;
-    expect(converted.values['safetySettings']).toEqual(GEMINI_SAFETY);
   });
 });
