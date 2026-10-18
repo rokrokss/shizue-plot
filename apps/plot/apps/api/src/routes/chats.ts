@@ -2704,7 +2704,8 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
           .where(eq(chats.id, chat.id))
           .returning();
         // Under the work's rows' own locks, after the chat's, as every writer takes them.
-        if (rewrite) await writeScriptRewrite(tx, chat, rewrite, lead);
+        // A summary of this chat's greeting it dropped is refreshed as an edit's is.
+        if (rewrite && (await writeScriptRewrite(tx, chat, rewrite, lead)).includes(chat.id)) dropped += 1;
         return { chat: row! };
       });
     } finally {

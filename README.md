@@ -56,7 +56,7 @@ stopped.
 | `apps/plot/apps/cli` | The `shizue-plot` package: its command and the build that bundles the app into it |
 | `apps/plot/apps/e2e` | Playwright browser tests |
 | `apps/plot/packages/core` | Character cards, prompts and chat presentation |
-| `apps/plot/packages/db` | Drizzle schema and PostgreSQL migrations |
+| `apps/plot/packages/db` | Drizzle schema and migrations of the app's PGlite database |
 | `apps/plot/packages/llm` | Model request formats, provider adapters and the ChatGPT connection |
 | `packages/contracts` | Validated chat-export format |
 
@@ -124,7 +124,7 @@ it starts. Next, React, PGlite, wasmoon and transformers.js stay dependencies.
 
 ### Card and module imports
 
-A reader's browser uploads a card or module file in 8 MB parts to the API,
+The browser uploads a card or module file in 8 MB parts to the API,
 which streams each to disk, and a job in the API reads it back and imports it
 (ARCHITECTURE §10 파일 임포트). The API reads one import at a time.
 

@@ -779,6 +779,9 @@ async function attachImage(chatId: string, messageId: string, bytes: Uint8Array 
       thumbhash: 'HBkSHYSIeHiPiHh8eJd4h4eAeIhw==',
     })
     .returning();
+  // PGlite's clock counts milliseconds, and a message's attachments are listed in
+  // the order they were stored: the next one is stored a tick later.
+  while (Date.now() <= row!.createdAt.getTime()) await new Promise((resolve) => setTimeout(resolve, 1));
   return toAttachmentJson(row!);
 }
 
@@ -13271,6 +13274,66 @@ describe('the browser script runtime', () => {
     // The greeting this chat opened on is the new first message, its revision moved past the old one's.
     const greeting = (await readJson(await request(reader, `/api/chats/${chat.chat.id}`))).path[0];
     expect(greeting).toMatchObject({ id: head.id, content: '{{char}}가 다시 문을 연다.', scriptRev: head.scriptRev + 2 });
+  });
+
+  it("drops the summaries of every greeting a script's first message changes, as an edit of it would", async () => {
+    const { cookie, plotId, memberId } = await scriptedPlot('scripts-greeting-memory@example.com');
+    await patchPlot(cookie, plotId, { intros: ['문 앞이다', '창가다'] });
+    const writing = await startChat(cookie, plotId);
+    const other = await startChat(cookie, plotId);
+    const onSecond = await startChat(cookie, plotId, { introIndex: 1 });
+    const stored = await json(cookie, `/api/chats/${other.chat.id}/messages`, 'POST', { content: '들어가도 돼?', stopped: true });
+    expect(stored.status, await stored.clone().text()).toBe(200);
+    const [greeting, turn] = (await readJson(stored)).path;
+    /** A summary as a finished refresh writes one, the next a tick later (PGlite's clock counts milliseconds). */
+    const summarize = async (chatId: string, messageIds: string[], text: string): Promise<void> => {
+      const [row] = await db.insert(chatSummaries).values({ chatId, text, messageIds }).returning();
+      while (Date.now() <= row!.createdAt.getTime()) await new Promise((resolve) => setTimeout(resolve, 1));
+    };
+    const summariesOf = async (chatId: string): Promise<string[]> =>
+      (await readJson(await request(cookie, `/api/chats/${chatId}/memory`))).summaries.map((summary: any) => summary.text);
+    const revisionOf = async (chatId: string): Promise<number> =>
+      (await db.select({ revision: chats.memoryRevision }).from(chats).where(eq(chats.id, chatId)))[0]!.revision;
+    await summarize(writing.chat.id, [writing.path[0].id], '쓴 챗의 문 앞.');
+    await summarize(other.chat.id, [greeting.id], '문 앞에서 만났다.');
+    await summarize(other.chat.id, [turn.id], '들어가도 되는지 물었다.');
+    await summarize(onSecond.chat.id, [onSecond.path[0].id], '창가에서 만났다.');
+    const revision = await revisionOf(other.chat.id);
+
+    const refreshes: Promise<void>[] = [];
+    const counting = makeApp({
+      onBackgroundTask: (task, kind) => {
+        if (kind === 'memory') refreshes.push(task);
+      },
+    });
+    const head = writing.path[0];
+    const commit = (scriptRev: number) =>
+      json(
+        cookie,
+        `/api/chats/${writing.chat.id}/script-commit`,
+        'POST',
+        { messageId: head.id, scriptRev, overlay: { members: { [memberId]: { firstMessage: '{{char}}가 다시 문을 연다.' } } } },
+        counting,
+      );
+    const first = await commit(head.scriptRev);
+    expect(first.status, await first.clone().text()).toBe(200);
+    // Each chat's greeting is the new first message: the summary of the old words goes, and the rest stay.
+    expect(await summariesOf(writing.chat.id)).toEqual([]);
+    expect(await summariesOf(other.chat.id)).toEqual(['들어가도 되는지 물었다.']);
+    expect(await revisionOf(other.chat.id)).toBe(revision + 1);
+    // A chat on the second opening keeps what it summarized of the greeting its branch opens on.
+    expect(await summariesOf(onSecond.chat.id)).toEqual(['창가에서 만났다.']);
+    // Only the chat the script ran in is summarized again at once; the others wait for their own next refresh.
+    expect(refreshes).toHaveLength(1);
+    await Promise.all(refreshes);
+
+    // The same first message again changes no greeting, and leaves the memory as it was.
+    await summarize(other.chat.id, [greeting.id], '다시 문 앞에서 만났다.');
+    const again = await commit(head.scriptRev + 2);
+    expect(again.status, await again.clone().text()).toBe(200);
+    expect(await summariesOf(other.chat.id)).toEqual(['다시 문 앞에서 만났다.', '들어가도 되는지 물었다.']);
+    expect(await revisionOf(other.chat.id)).toBe(revision + 1);
+    expect(refreshes).toHaveLength(1);
   });
 
   it('prompts with the name and the first message the scripts left, where RisuAI would', async () => {

@@ -407,7 +407,6 @@ test('the chats come over with their swipes, speakers and persona', async () => 
   // The branch parts after the first reply: its turn is the narration's sibling, kept in the tree.
   const fork = state.siblings[state.path[2]!.id]!;
   expect(fork.total).toBe(2);
-  const other = fork.ids.find((id) => id !== state.path[2]!.id)!;
 
   // A one-member chat keeps its prefixes and names nobody by id.
   expect(state.path.every((message) => !message.speakerMemberId)).toBe(true);

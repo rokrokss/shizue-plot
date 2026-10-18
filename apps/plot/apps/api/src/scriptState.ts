@@ -49,6 +49,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { coerceLorebook } from './card.js';
 import type { AppDeps, Tx } from './deps.js';
 import { ApiError, badRequest } from './errors.js';
+import { invalidateMemoryForEdit } from './memory.js';
 import { isUuid, optionalBoolean } from './util.js';
 
 /** Characters one injected block may hold — a system prompt, not a chapter. */
@@ -396,13 +397,18 @@ export function rewrittenCard(card: NormalizedCard, fields: MemberOverlay): Norm
  *   (`customUi.backgroundHtml`), and its first message the work's first
  *   opening — what a new chat starts on — and the first greeting of every chat
  *   of the work, as RisuAI draws a chat's first greeting from its character.
- *   Another member's stay on its own card, as the page reads them only for
- *   the lead;
+ *   A greeting whose words change is edited in place, and the summaries
+ *   covering it go as an edit's do (`invalidateMemoryForEdit`). Another
+ *   member's stay on its own card, as the page reads them only for the lead;
  * - the persona goes to the chat's persona, RisuAI's being the reader's own for
  *   every character — and nowhere for a chat without one.
  *
  * Each field is a whole value: the latest write of it stands. Members are held
- * to the plot (`checkScriptRewrite`) by the caller.
+ * to the plot (`checkScriptRewrite`) by the caller. Answers the chats whose
+ * summaries the greeting's rewrite dropped. The chat the write was made in is
+ * refreshed as its turn or its commit is; the others summarize the stretch
+ * again on their own next refresh, so one chat's script does not start a
+ * summary call for every chat of the work (§7.3).
  */
 export async function writeScriptRewrite(
   tx: Tx,
@@ -410,7 +416,7 @@ export async function writeScriptRewrite(
   patch: ScriptOverlay,
   /** The scripted member, whose background and first message are the work's; undefined when none is. */
   lead: string | undefined,
-): Promise<void> {
+): Promise<string[]> {
   const rewrites = Object.entries(patch.members ?? {});
   for (const [id, fields] of rewrites) {
     const [member] = await tx
@@ -454,21 +460,31 @@ export async function writeScriptRewrite(
         .where(eq(plots.id, chat.plotId));
     }
   }
+  const dropped: string[] = [];
   if (firstMessage !== undefined) {
     // Each chat's oldest root, where it is a greeting: the first opening it has.
     // Its revision moves, as a script commit's does, so a commit made over the old
     // text is refused rather than written over the new one.
-    await tx.execute(sql`
+    const { rows: greetings } = await tx.execute<{ id: string; chat_id: string; was: string }>(sql`
       update messages set content = ${firstMessage}, script_rev = script_rev + 1
-      where role = 'assistant' and id in (
-        select distinct on (m.chat_id) m.id from messages m join chats c on c.id = m.chat_id
+      from (
+        select distinct on (m.chat_id) m.id, m.content from messages m join chats c on c.id = m.chat_id
         where c.plot_id = ${chat.plotId} and m.parent_id is null
         order by m.chat_id, m.created_at, m.id
-      )`);
+      ) greeting
+      where messages.id = greeting.id and messages.role = 'assistant'
+      returning messages.id, messages.chat_id, greeting.content as was`);
+    // Only a greeting whose words changed: a script that writes the same first
+    // message on every turn leaves the memory as it was.
+    for (const greeting of greetings) {
+      if (greeting.was === firstMessage) continue;
+      if ((await invalidateMemoryForEdit(tx, greeting.chat_id, greeting.id)) > 0) dropped.push(greeting.chat_id);
+    }
   }
   if (patch.persona !== undefined && chat.personaId) {
     await tx.update(personas).set({ description: patch.persona }).where(eq(personas.id, chat.personaId));
   }
+  return dropped;
 }
 
 /**

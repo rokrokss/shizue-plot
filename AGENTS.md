@@ -53,7 +53,7 @@ only inside `apps/api` — without it the process restarts over and over.
 pnpm install
 pnpm --filter @shizue/contracts --filter './apps/plot/packages/*' build
 pnpm typecheck
-pnpm --filter @shizue/plot exec vitest run apps/web/test/authForm.test.ts
+pnpm --filter @shizue/plot exec vitest run apps/web/test/header.test.ts
 pnpm --filter @shizue/e2e exec playwright test tests/chatgpt.spec.ts
 pnpm test
 make e2e
