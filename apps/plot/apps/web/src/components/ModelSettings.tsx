@@ -145,13 +145,13 @@ export function ModelSettings({ chatgptError }: { chatgptError?: string }) {
         </div>
         <ErrorText>{error}</ErrorText>
       </section>
+      <ChatGPTConnection error={chatgptError} />
       <CredentialSettings
         credentials={credentials.filter((credential) => credential.kind !== 'chatgpt')}
         formats={formats}
         local={local}
         onChanged={() => void load()}
       />
-      <ChatGPTConnection error={chatgptError} />
     </>
   );
 }
