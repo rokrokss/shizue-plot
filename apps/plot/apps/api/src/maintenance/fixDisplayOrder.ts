@@ -1,15 +1,15 @@
 /**
  * Rewrites the display scripts of plots imported before RisuAI's `<order N>` was
  * read the right way round, and leaves every plot its creator has changed since
- * (`displayOrder.ts`). Against DATABASE_URL — apps/plot/.env's unless the
- * environment says otherwise.
+ * (`displayOrder.ts`). Against the app's folder (SHIZUE_DATA_DIR), never while
+ * the app runs.
  *
  *   pnpm --filter @shizue/api fix:display-order            dry run: prints what it would change
  *   pnpm --filter @shizue/api fix:display-order --apply    writes it
  */
 
-import { createDb } from '@shizue/db';
-import { loadRootEnv } from '../env.js';
+import { openAppDb } from '../appDb.js';
+import { dataDirOf, loadRootEnv } from '../env.js';
 import { repairDisplayOrder } from './displayOrder.js';
 
 loadRootEnv();
@@ -22,16 +22,11 @@ if (unknown.length > 0 || (args.includes('--apply') && args.includes('--dry-run'
 }
 const apply = args.includes('--apply');
 
-const url = process.env['DATABASE_URL'];
-if (!url) {
-  console.error('DATABASE_URL is not set.');
-  process.exit(2);
-}
-// Which database, without the credentials the URL carries.
-const target = new URL(url);
-console.log(`${apply ? 'Applying to' : 'Dry run against'} ${target.host}${target.pathname}`);
+// The app's folder (SHIZUE_DATA_DIR): never while the app runs — its lock refuses a second process.
+const dataDir = dataDirOf(process.env);
+console.log(`${apply ? 'Applying to' : 'Dry run against'} ${dataDir}`);
 
-const { db, close } = createDb(url);
+const { db, close } = await openAppDb(dataDir);
 try {
   await repairDisplayOrder(db, { apply });
   if (!apply) console.log('Nothing was written. Run again with --apply to write it.');

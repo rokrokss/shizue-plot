@@ -191,29 +191,29 @@ export async function lexicalPlotIds(db: Db | Tx, query: string, filters: SQL[],
   if (stems.size === 0) return [];
   const listed = and(...filters, isNotNull(plotSearchVectors.terms));
   const pool = sql`${plotSearchVectors} join ${plots} on ${plots.id} = ${plotSearchVectors.plotId}`;
-  const [stats] = await db.execute<{ documents: number; average: number }>(sql`
+  const [stats] = (await db.execute<{ documents: number; average: number }>(sql`
     select count(*)::int as documents, coalesce(avg(${plotSearchVectors.termCount}), 0)::float8 as average
-    from ${pool} where ${listed}`);
+    from ${pool} where ${listed}`)).rows;
   const documents = stats?.documents ?? 0;
   if (documents === 0) return [];
   const cap = rareLimit(documents);
-  const counted = await db.execute<{ term: string; frequency: number }>(sql`
+  const counted = (await db.execute<{ term: string; frequency: number }>(sql`
     select t.term, (
       select count(*)::int from (
         select 1 from ${pool} where ${listed} and ${plotSearchVectors.terms} @@ t.query::tsquery limit ${cap + 1}
       ) held
     ) as frequency
-    from unnest(${textArray(terms)}::text[], ${textArray(terms.map(quotedTerm))}::text[]) as t(term, query)`);
+    from unnest(${textArray(terms)}::text[], ${textArray(terms.map(quotedTerm))}::text[]) as t(term, query)`)).rows;
   const frequency = new Map([...counted].map((row) => [row.term, row.frequency]));
   const rare = terms.filter((term) => (frequency.get(term) ?? 0) > 0 && frequency.get(term)! <= cap);
   const rareStems = rare.filter((term) => stems.has(term));
   if (rareStems.length === 0) return [];
-  const candidates = await db.execute<{ id: string; length: number; held: [string, number][] }>(sql`
+  const candidates = (await db.execute<{ id: string; length: number; held: [string, number][] }>(sql`
     select ${plotSearchVectors.plotId} as id, ${plotSearchVectors.termCount} as length, (
       select coalesce(json_agg(json_build_array(u.lexeme, cardinality(u.positions))), '[]'::json)
       from unnest(${plotSearchVectors.terms}) u where u.lexeme = any(${textArray(rare)}::text[])
     ) as held
-    from ${pool} where ${listed} and ${plotSearchVectors.terms} @@ ${rareStems.map(quotedTerm).join(' | ')}::tsquery`);
+    from ${pool} where ${listed} and ${plotSearchVectors.terms} @@ ${rareStems.map(quotedTerm).join(' | ')}::tsquery`)).rows;
   return [...candidates]
     .map((row) => {
       const matched = row.held.map(([term]) => ({ term, frequency: frequency.get(term)! }));

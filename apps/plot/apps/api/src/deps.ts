@@ -71,13 +71,6 @@ export interface AppDeps {
   generationClaims: Map<string, GenerationClaim>;
   /** The generation streams this instance has open, for the reader's stop and shutdown (`stopChatGeneration`, `stopGenerations`). */
   generationStreams: Set<OpenGeneration>;
-  /**
-   * Reaches the instance streaming a chat's reply when it is not this one: a
-   * Postgres `NOTIFY` on `STOP_CHANNEL`, which every instance listens on and
-   * answers by stopping its own stream of that chat (`stopChatGeneration`,
-   * index.ts). Absent where one instance is all there is, as in most tests.
-   */
-  stopSignal?: { publish(chatId: string): Promise<void> };
   /** Chat ids with a memory refresh in flight — one concurrent refresh per chat. */
   refreshingMemory: Set<string>;
   /**

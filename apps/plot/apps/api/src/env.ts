@@ -1,5 +1,7 @@
+import { randomBytes } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { config } from 'dotenv';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { S3Config } from './s3.js';
 import type { StorageConfig } from './storage.js';
@@ -7,13 +9,44 @@ import type { StorageConfig } from './storage.js';
 /** Repo root, three levels up from both `src/` and the built `dist/`. */
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 
+/**
+ * The app's own folder (`SHIZUE_DATA_DIR`): its database, its files and its
+ * secret, everything that is the reader's. Development keeps it under
+ * `apps/plot/data/app`; the published app points it at the OS's app-data folder.
+ */
+export const dataDirOf = (env: NodeJS.ProcessEnv): string =>
+  resolve(REPO_ROOT, env['SHIZUE_DATA_DIR']?.trim() || './data/app');
+
+/** Where PGlite keeps the database inside the app's folder. */
+export const dbDirOf = (dataDir: string): string => join(dataDir, 'db');
+
+/** Where the files are kept inside the app's folder: avatars, assets, attachments, imports. */
+export const filesDirOf = (dataDir: string): string => join(dataDir, 'files');
+
+/**
+ * This install's secret, `secret` in the app's folder: made once, readable by
+ * its owner only, and read back on every start. It seals the ChatGPT tokens at
+ * rest and derives this install's OpenAI host ID, so it never changes once made.
+ */
+export function readOrCreateSecret(dataDir: string): string {
+  const path = join(dataDir, 'secret');
+  try {
+    return readFileSync(path, 'utf8').trim();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  mkdirSync(dataDir, { recursive: true });
+  const secret = randomBytes(32).toString('base64');
+  // `wx`: a second process starting at the same moment fails here rather than writing another.
+  writeFileSync(path, `${secret}\n`, { mode: 0o600, flag: 'wx' });
+  return secret;
+}
+
 /** Loads the repo-root .env into process.env (existing vars win). */
 export function loadRootEnv(): void {
   config({ path: resolve(REPO_ROOT, '.env'), quiet: true });
 }
 
-/** Development defaults. A production launch must set its own secret (readConfig). */
-const DEV_AUTH_SECRET = 'dev-secret-change-me';
 /** The shortest secret a deployment takes: 32 characters, what `openssl rand -base64 32` prints is 44. */
 const MIN_AUTH_SECRET_CHARS = 32;
 const DEV_AUTH_URL = 'http://localhost:13000';
@@ -108,11 +141,16 @@ interface ApiConfig {
   port: number;
   /** Where the API listens. Loopback beside the web app; `0.0.0.0` on a server of its own. */
   host: string;
-  databaseUrl: string;
-  /** Which object-storage driver this process runs on, decided once at boot. */
+  /** The app's own folder (`dataDirOf`): the database, the files and the secret. */
+  dataDir: string;
+  /** Where the files are kept: the local directory in the app's folder. */
   storage: StorageConfig;
-  /** Seals ChatGPT tokens at rest and derives this server's OpenAI host ID. */
-  authSecret: string;
+  /**
+   * Seals ChatGPT tokens at rest and derives this server's OpenAI host ID:
+   * `BETTER_AUTH_SECRET` when set, else this install's own (`readOrCreateSecret`),
+   * which the entry point reads so that reading the config writes nothing.
+   */
+  authSecret?: string;
   /** The web app's origin: writes must come from it, and sign-in returns to it. */
   authUrl: string;
   /**
@@ -166,28 +204,9 @@ export function readInteger(env: NodeJS.ProcessEnv, name: string, min: number, m
 const readBoolean = (value: string | undefined): boolean => value === 'true' || value === '1';
 
 /**
- * The storage driver, and everything it needs. Read once here rather than
- * branched on per call: `STORAGE_DRIVER` is the only switch, and an unset one
- * means the local directory this repo has always used, so a developer who
- * configures nothing sees no change.
- */
-function readStorageConfig(env: NodeJS.ProcessEnv): StorageConfig {
-  const driver = env['STORAGE_DRIVER'] ?? 'local';
-  if (driver === 'local') {
-    // Relative to the repo root, so the cwd of the launching script does not matter.
-    return { driver: 'local', dir: resolve(REPO_ROOT, env['UPLOAD_DIR'] ?? './data/uploads') };
-  }
-  if (driver !== 's3') {
-    throw new Error(`STORAGE_DRIVER must be "local" or "s3", got "${driver}"`);
-  }
-  if (!env['S3_BUCKET']) throw new Error('S3_BUCKET is not set, and STORAGE_DRIVER=s3 has nowhere to write');
-  return { driver: 's3', ...readS3Config(env) };
-}
-
-/**
- * The S3 store `S3_*` names, whatever `STORAGE_DRIVER` says: the media driver's
- * when it is `s3`, and always where the embedder's own weights are kept
- * (`embedder:fetch`, `embedder:publish`).
+ * The S3 store `S3_*` names, where the embedder's own weights are kept
+ * (`embedder:fetch`, `embedder:publish`). The app's files are never there: they
+ * are in the app's folder.
  */
 export function readS3Config(env: NodeJS.ProcessEnv): S3Config {
   const bucket = env['S3_BUCKET'];
@@ -206,20 +225,19 @@ export function readS3Config(env: NodeJS.ProcessEnv): S3Config {
 }
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
-  const databaseUrl = env['DATABASE_URL'];
-  if (!databaseUrl) throw new Error('DATABASE_URL is not set');
-
+  const dataDir = dataDirOf(env);
   const authSecret = env['BETTER_AUTH_SECRET'];
   const authUrl = env['BETTER_AUTH_URL'] ?? DEV_AUTH_URL;
   if (!/^https?:$/.test(new URL(authUrl).protocol) || new URL(authUrl).origin !== authUrl) {
     throw new Error('BETTER_AUTH_URL must be the web origin, e.g. https://plot.example.com');
   }
-  // Everyone's ChatGPT tokens are sealed with it, so a deployment never runs on
-  // the default or a guessable one. A deployment is a production run, or any run
+  // The ChatGPT tokens are sealed with it, so a deployment never runs on a
+  // guessable one. Unset, every install has its own (`readOrCreateSecret`); only a
+  // short one set by hand is refused. A deployment is a production run, or any run
   // whose web origin is not this machine's — `node dist/index.js` sets no NODE_ENV.
   const deployed = env['NODE_ENV'] === 'production' || !isLoopback(authUrl);
-  if (deployed && (authSecret ?? '').length < MIN_AUTH_SECRET_CHARS) {
-    throw new Error(`BETTER_AUTH_SECRET must be set, at least ${MIN_AUTH_SECRET_CHARS} characters, to serve ${authUrl} (e.g. openssl rand -base64 32).`);
+  if (deployed && authSecret !== undefined && authSecret.length < MIN_AUTH_SECRET_CHARS) {
+    throw new Error(`BETTER_AUTH_SECRET must be at least ${MIN_AUTH_SECRET_CHARS} characters to serve ${authUrl} (e.g. openssl rand -base64 32), or unset for this install's own.`);
   }
   const callbackPort = readCallbackPort(env, authUrl);
   const logFormat = env['LOG_FORMAT']?.trim() || 'text';
@@ -230,9 +248,9 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   return {
     port: Number(env['API_PORT'] ?? 8787),
     host: env['API_HOST'] ?? '127.0.0.1',
-    databaseUrl,
-    storage: readStorageConfig(env),
-    authSecret: authSecret ?? DEV_AUTH_SECRET,
+    dataDir,
+    storage: { driver: 'local', dir: filesDirOf(dataDir) },
+    ...(authSecret ? { authSecret } : {}),
     authUrl,
     remoteOrigins,
     ...(env['API_ORIGIN'] ? { apiOrigin: new URL(env['API_ORIGIN']).origin } : {}),

@@ -2,36 +2,22 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { REALM_ORIGIN } from '@/lib/realm';
 import { THEME_SCRIPT } from '@/lib/theme';
-import { contentSecurityPolicy, securityHeaders, storeOrigin } from '../securityHeaders';
+import { contentSecurityPolicy, securityHeaders } from '../securityHeaders';
 
 const directive = (policy: string, name: string): string[] =>
   policy.split('; ').find((part) => part.startsWith(`${name} `))?.split(' ').slice(1) ?? [];
 
 describe('page security headers', () => {
-  it('hold pictures, music, fonts and connections to our origin, with Realm and the store beside it', () => {
-    const policy = contentSecurityPolicy({
-      STORAGE_DRIVER: 's3', S3_BUCKET: 'shizue-media', S3_ENDPOINT: 'http://localhost:19000', S3_FORCE_PATH_STYLE: 'true',
-    }, 'n0nce');
+  it('hold pictures, music, fonts and connections to our origin, with Realm beside it', () => {
+    const policy = contentSecurityPolicy({}, 'n0nce');
     expect(directive(policy, 'img-src')).toEqual(["'self'", 'data:', 'blob:']);
     expect(directive(policy, 'media-src')).toEqual(["'self'", 'data:', 'blob:']);
     expect(directive(policy, 'font-src')).toEqual(["'self'", 'data:']);
-    expect(directive(policy, 'connect-src')).toEqual(["'self'", REALM_ORIGIN, 'http://localhost:19000']);
+    expect(directive(policy, 'connect-src')).toEqual(["'self'", REALM_ORIGIN]);
     expect(directive(policy, 'object-src')).toEqual(["'none'"]);
     expect(directive(policy, 'base-uri')).toEqual(["'self'"]);
     expect(directive(policy, 'form-action')).toEqual(["'self'"]);
     expect(directive(policy, 'frame-ancestors')).toEqual(["'none'"]);
-  });
-
-  it('name the store the API presigns parts for', () => {
-    expect(storeOrigin({})).toBeNull();
-    expect(storeOrigin({ STORAGE_DRIVER: 'local', S3_ENDPOINT: 'http://localhost:19000' })).toBeNull();
-    const s3 = { STORAGE_DRIVER: 's3', S3_BUCKET: 'media', S3_ENDPOINT: 'http://minio.internal:9000' };
-    expect(storeOrigin({ ...s3, S3_FORCE_PATH_STYLE: '1' })).toBe('http://minio.internal:9000');
-    expect(storeOrigin({ ...s3, S3_PUBLIC_ENDPOINT: 'https://media.example.com/', S3_FORCE_PATH_STYLE: 'true' }))
-      .toBe('https://media.example.com');
-    expect(storeOrigin({ ...s3, S3_PUBLIC_ENDPOINT: 'https://r2.example.com' })).toBe('https://media.r2.example.com');
-    expect(storeOrigin({ STORAGE_DRIVER: 's3', S3_BUCKET: 'media', S3_REGION: 'ap-northeast-2' }))
-      .toBe('https://media.s3.ap-northeast-2.amazonaws.com');
   });
 
   it('run only our files, the scripts carrying the nonce and the theme script, and eval nothing outside next dev', () => {

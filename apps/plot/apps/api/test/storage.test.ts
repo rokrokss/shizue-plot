@@ -1,13 +1,7 @@
 /**
  * The `ObjectStorage` contract, run against every driver there is.
  *
- * The local driver always runs. The S3 driver runs against the RustFS from
- * `docker-compose.yml` when it answers on localhost:19000, and is skipped —
- * loudly, by name — when it does not, because a store this thin is exactly the
- * thing a mock would agree with while the real one disagreed.
- *
- * Both are resolved at module load rather than in `beforeAll`: vitest decides
- * what to skip while it collects, which is before any hook has run.
+ * The local driver is the only one: the files live in the app's own folder.
  */
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
@@ -26,13 +20,11 @@ import {
   PartSizeMismatch,
   type ObjectStorage,
 } from '../src/storage.js';
-import { connectS3Server } from './s3Server.js';
 
 const bytesOf = (text: string): Uint8Array => new TextEncoder().encode(text);
 
 const localDir = await mkdtemp(join(tmpdir(), 'shizue-storage-test-'));
 const local = createLocalStorage(localDir);
-const s3 = await connectS3Server();
 
 /** The contract itself: everything below holds for any driver that implements it. */
 function contractOf(name: string, storage: ObjectStorage | null): void {
@@ -209,10 +201,9 @@ function streamingContractOf(name: string, storage: ObjectStorage | null): void 
 }
 
 streamingContractOf('local', local);
-streamingContractOf('s3 (RustFS)', s3);
 
 contractOf('local', local);
-contractOf('s3 (RustFS)', s3);
+
 
 describe('local driver', () => {
   it('lays the namespaces out as directories under one root', async () => {

@@ -4,7 +4,6 @@ import { mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { createS3Storage, type S3Config } from './s3.js';
 
 /** Image keys include their namespace so one bucket can store every chat image. */
 const AVATARS = 'avatars';
@@ -265,13 +264,10 @@ export function createLocalStorage(root: string): ObjectStorage {
   };
 }
 
-/** Which driver the process runs on, read once from the environment (env.ts). */
-export type StorageConfig = { driver: 'local'; dir: string } | ({ driver: 's3' } & S3Config);
+/** Where the files are kept, read once from the environment (env.ts): the app's own folder. */
+export type StorageConfig = { driver: 'local'; dir: string };
 
-/**
- * The single decision, made once at startup. Nothing downstream asks which driver
- * it got — the routes hold an `ObjectStorage` and that is all they know.
- */
+/** The store the routes hold; they know an `ObjectStorage` and nothing about where it writes. */
 export function createStorage(config: StorageConfig): ObjectStorage {
-  return config.driver === 's3' ? createS3Storage(config) : createLocalStorage(config.dir);
+  return createLocalStorage(config.dir);
 }

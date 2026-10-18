@@ -2,12 +2,10 @@
  * Integration tests for @shizue/api.
  *
  * Requirements:
- *  - Postgres from `docker compose up -d` (localhost:15433) with `pnpm db:migrate` applied.
  *  - `pnpm -r build` at the workspace root beforehand: @shizue/db, @shizue/core and @shizue/llm
  *    resolve to their dist output.
- *  - Connection string: TEST_DATABASE_URL, a scratch database whose name ends in `_test`
- *    (`resolveTestDatabaseUrl` below refuses everything else — every table is
- *    TRUNCATEd before each test).
+ *  - Nothing else: the database is the app's own, PGlite, in memory for this file —
+ *    migrated once, every table TRUNCATEd before each test.
  *
  * The suite runs the Hono app in-process through `app.request()` and only ever uses
  * the `echo/echo` model, so no provider key is needed.
@@ -78,8 +76,9 @@ import {
   chatSummaries,
   chatSummaryChunks,
   comments,
-  createDb,
-  feedCursors,
+  migrateDb,
+  openDb,
+  type OpenedDb,
   fileImportKeys,
   fileImports,
   follows,
@@ -145,9 +144,7 @@ import {
   acquireChatSlot,
   releaseChatSlot,
   renewChatSlot,
-  STOP_CHANNEL,
   stopGenerations,
-  stopLocalGeneration,
   TAVERN_BIAS_NUDGE,
 } from '../src/generation.js';
 import {
@@ -177,87 +174,12 @@ import { createScriptFetch, type HopResponse, type Transport } from '../src/scri
 import { MAX_GLOBAL_VARIABLE_KEYS } from '../src/scriptState.js';
 import { createLocalStorage, importFileKey, PartSizeMismatch, partOf, readAll, type ObjectStorage } from '../src/storage.js';
 import { deepestLeaf, roundCount, roundStart } from '../src/tree.js';
-import { connectS3Server } from './s3Server.js';
 
 loadRootEnv();
 
-/**
- * The connection string for a suite that TRUNCATEs twenty-five tables before every
- * test, so the target has to say out loud that it is disposable. There is no
- * fallback to DATABASE_URL: that is the app's own database, and it is the name a
- * CI secret is most likely to carry.
- *
- * The name check is the one that survives a copied secret — `TEST_DATABASE_URL`
- * set from the same value as the app's would pass an equality check the moment
- * DATABASE_URL is not also exported. A marker table would be stronger still, but
- * the suite builds its own schema from migrations and would have to create the
- * marker itself, which is the same as not having one; the name is the part only
- * a database created for this can satisfy.
- *
- * A `database` query parameter is refused rather than read. postgres.js takes the
- * name from the pathname but forwards unknown parameters into the startup packet,
- * where the server honours `database` and overrides it — so
- * `…/plot_test?database=plot` reads as disposable here and opens `plot`
- * (verified against postgres@3.4.9; `db`/`dbname` are rejected by the server as
- * unrecognized parameters, and are refused here too so no spelling of it works).
- * `assertDisposableTarget` then re-checks the database the driver actually opened,
- * which is the part no URL parsing can get wrong.
- */
-function resolveTestDatabaseUrl(): string {
-  const remedy =
-    'Point TEST_DATABASE_URL at a scratch database whose name ends in `_test`, e.g. postgres://plot:plot@localhost:15433/plot_test — create it once with `docker compose exec -T postgres psql -U plot -d plot -c "CREATE DATABASE plot_test"` and migrate it with `DATABASE_URL=postgres://plot:plot@localhost:15433/plot_test pnpm db:migrate` (README §검증).';
-  const url = process.env['TEST_DATABASE_URL'];
-  if (!url) throw new Error(`TEST_DATABASE_URL is not set. ${remedy}`);
-  if (process.env['NODE_ENV'] === 'production') {
-    throw new Error('refusing to run with NODE_ENV=production: this suite truncates every table.');
-  }
-  if (url === process.env['DATABASE_URL']) {
-    throw new Error(
-      `TEST_DATABASE_URL is the same as DATABASE_URL, the database the app itself runs on. ${remedy}`,
-    );
-  }
-  const parsed = new URL(url);
-  for (const [key] of parsed.searchParams) {
-    if (['database', 'db', 'dbname'].includes(key.toLowerCase())) {
-      throw new Error(
-        `TEST_DATABASE_URL carries a "${key}" parameter, which redirects the connection away from the database its path names. Drop it. ${remedy}`,
-      );
-    }
-  }
-  // Only the database name is quoted back: the URL carries credentials.
-  const name = parsed.pathname.slice(1);
-  if (!name.endsWith('_test')) {
-    throw new Error(
-      `TEST_DATABASE_URL names database "${name}", which is not marked as disposable. ${remedy}`,
-    );
-  }
-  return url;
-}
-
-/**
- * Last gate before the first TRUNCATE: ask the open connection what it is on.
- * Runs in `beforeAll`, which vitest completes before any `beforeEach`.
- */
-async function assertDisposableTarget(): Promise<void> {
-  const [row] = await sql<{ db: string }[]>`select current_database() as db`;
-  if (!row?.db.endsWith('_test')) {
-    await close();
-    throw new Error(
-      `connected to database "${row?.db}", which is not marked as disposable — refusing to truncate it. Check TEST_DATABASE_URL.`,
-    );
-  }
-}
-
-const databaseUrl = resolveTestDatabaseUrl();
 // The built-in OAI2 preset's main prompt as a chat without a persona sends it: its `{{user}}` the default name.
 const OAI2_MAIN_SENT = OAI2_MAIN.replaceAll('{{user}}', DEFAULT_USER_NAME);
 
-/**
- * The S3 driver's target: the compose RustFS when it answers, null otherwise. Resolved
- * at module load because vitest decides what to skip while it collects, and the
- * stub driver below covers the same route contract when it is null.
- */
-const s3Storage = await connectS3Server();
 
 const v2Card = {
   spec: 'chara_card_v2',
@@ -304,8 +226,20 @@ const emptyCardShape = {
 };
 
 let db: Db;
-let sql: ReturnType<typeof createDb>['sql'];
+let client: OpenedDb['client'];
 let close: () => Promise<void>;
+
+/**
+ * postgres.js's tagged template over PGlite, for the raw statements the tests
+ * write: each value a `$n` parameter, the rows back.
+ */
+async function sql<Rows extends readonly object[] = Record<string, unknown>[]>(
+  strings: TemplateStringsArray,
+  ...values: unknown[]
+): Promise<Rows> {
+  const text = strings.reduce((out, part, at) => out + part + (at < values.length ? `$${at + 1}` : ''), '');
+  return (await client.query(text, values)).rows as unknown as Rows;
+}
 let storageDir: string;
 let storage: ObjectStorage;
 let auth: ReturnType<typeof createAuth>;
@@ -314,8 +248,8 @@ let app: Hono<AppEnv>;
 let jobHandlers: JobHandlers;
 
 beforeAll(async () => {
-  ({ db, sql, close } = createDb(databaseUrl));
-  await assertDisposableTarget();
+  ({ db, client, close } = await openDb());
+  await migrateDb(db);
   storageDir = await mkdtemp(join(tmpdir(), 'shizue-api-test-'));
   storage = createLocalStorage(storageDir);
 });
@@ -325,7 +259,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await sql`TRUNCATE TABLE memories, chat_attachments, messages, chat_note_links, user_notes, plot_reader_variables, plot_reader_overlays, chats, personas, comments, plot_likes, plot_assets, characters, notifications, follows, plots, feed_cursors, jobs, rate_limits, leases, "session", account, verification, "user" RESTART IDENTITY CASCADE`;
+  await client.exec(`TRUNCATE TABLE memories, chat_attachments, messages, chat_note_links, user_notes, plot_reader_variables, plot_reader_overlays, chats, personas, comments, plot_likes, plot_assets, characters, notifications, follows, plots, feed_cursors, jobs, rate_limits, leases, "session", account, verification, "user" RESTART IDENTITY CASCADE`);
   auth = createAuth(db, {
     secret: 'test-secret-test-secret-test-secret',
     baseUrl: 'http://localhost:13000',
@@ -618,22 +552,6 @@ const encodeCursor = (payload: unknown): string =>
  * survive without the driver ever handing the value back intact.
  */
 const microsecond = (fraction: string): string => `2027-01-01 00:00:00.${fraction}+00`;
-
-/**
- * Blocks until another backend is waiting on a lock — a barrier for tests that
- * hold a row and need the request racing them to have actually reached it. Polls
- * rather than sleeping, so it does not depend on how fast anything is.
- */
-async function waitForLockWaiter(waiters = 1): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    const [row] = await sql`
-      select count(*)::int as waiting from pg_stat_activity
-      where datname = current_database() and wait_event_type = 'Lock' and pid <> pg_backend_pid()`;
-    if (Number(row!['waiting']) >= waiters) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error('no backend ever blocked on a lock');
-}
 
 /** Polls until `check` holds; the fire-and-forget work a request starts has no handle. */
 async function until(check: () => Promise<boolean>, what: string): Promise<void> {
@@ -4415,6 +4333,9 @@ describe('chats', () => {
     const holder = makeDeps();
 
     expect(await acquireChatSlot(lost, chatId, userId)).toBe(true);
+    // A claim is known by its time, which counts milliseconds: the takeover is a tick later.
+    const first = (await claimOf(chatId))!;
+    while (Date.now() <= first.getTime()) await new Promise((resolve) => setTimeout(resolve, 1));
     // Two minutes on, with nothing renewing it, another instance declares the
     // first one dead and takes the chat over.
     await db
@@ -4673,45 +4594,6 @@ describe('chats', () => {
     expect(state.path.at(-1)).toMatchObject({ role: 'assistant', content: '부분 응답' });
     // Nothing running is nothing to stop.
     expect((await json(cookie, `/api/chats/${chatId}/stop`, 'POST', undefined, target)).status).toBe(204);
-  });
-
-  it("stops a reply another instance is streaming: the stop goes out on Postgres, and answers once that instance stored it and freed the chat", async () => {
-    const cookie = await signUp('stop-relayed@example.com');
-    const streaming = makeDeps({
-      getAdapter: () => ({
-        providerModel: 'slow',
-        adapter: {
-          stream: async function* (req): AsyncGenerator<StreamDelta, StreamDone> {
-            yield { type: 'text', text: '다른 인스턴스의 답' };
-            await new Promise<void>((_resolve, reject) => {
-              const fail = (): void => reject(new Error('aborted'));
-              if (req.abortSignal?.aborted) fail();
-              else req.abortSignal?.addEventListener('abort', fail);
-            });
-            return { usage: { promptTokens: 0, completionTokens: 0 } };
-          },
-        },
-      }),
-    });
-    // The instance the stop reaches has no stream of its own, only the channel.
-    const other = createApp(makeDeps({ stopSignal: { publish: async (id) => void (await sql.notify(STOP_CHANNEL, id)) } }));
-    const listening = await sql.listen(STOP_CHANNEL, (id) => stopLocalGeneration(streaming, id));
-    try {
-      const { chatId } = await setupChat(cookie);
-      const res = await json(cookie, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕' }, createApp(streaming));
-      await res.body!.getReader().read();
-      expect(await claimOf(chatId)).not.toBeNull();
-
-      expect((await json(cookie, `/api/chats/${chatId}/stop`, 'POST', undefined, other)).status).toBe(204);
-      expect(await claimOf(chatId)).toBeNull();
-      expect(streaming.generationStreams.size).toBe(0);
-      const state = await readJson(await request(cookie, `/api/chats/${chatId}`));
-      expect(state.path.at(-1)).toMatchObject({ role: 'assistant', content: '다른 인스턴스의 답' });
-      // Nothing held is nothing to relay.
-      expect((await json(cookie, `/api/chats/${chatId}/stop`, 'POST', undefined, other)).status).toBe(204);
-    } finally {
-      await listening.unlisten();
-    }
   });
 
   it("stops a reply mid-stream on shutdown as the reader's stop does: kept, and the chat freed before it returns", async () => {
@@ -8685,6 +8567,9 @@ describe('memory', () => {
           ...scene,
         })
         .returning();
+      // PGlite's clock counts milliseconds, and facts are listed by when they were
+      // written: the next one, a test's or an extraction's, is written a tick later.
+      while (Date.now() <= row!.createdAt.getTime()) await new Promise((resolve) => setTimeout(resolve, 1));
       return row!;
     }
 
@@ -8965,10 +8850,6 @@ describe('memory', () => {
       await db.update(chatSummaries).set({ turnFrom: 2, turnTo: 3 }).where(eq(chatSummaries.id, back.id));
 
       const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-      // The app's clock a minute behind the database's, as on another machine
-      // (or as Docker's drifts): the facts must still come in the order written.
-      const appClock = Date.now;
-      const behind = vi.spyOn(Date, 'now').mockImplementation(() => appClock() - 60_000);
       try {
         await extractFacts(harness.deps, embedder, {
           ...(await extractionSource(chatId, ids.slice(3, 6))),
@@ -8982,7 +8863,6 @@ describe('memory', () => {
           `[facts] chat ${chatId}: 1 added, 1 updated, 1 invalidated of 3 shown, 1 rejected, 0 ended later`,
         );
       } finally {
-        behind.mockRestore();
         log.mockRestore();
       }
       // Shown the branch's facts from before it, numbered, ahead of the transcript.
@@ -10411,66 +10291,6 @@ describe('plot hub', () => {
     expect((await readJson(stale)).code).toBe('invalid_request');
   });
 
-  it('hands two requests racing on one cursor the same page, not two halves of it', async () => {
-    const alice = await signUp('explore-race@example.com');
-    const bob = await signUp('explore-race-reader@example.com');
-    const ids = new Map<string, string>();
-    for (const [name, likeCount] of RANKED) {
-      ids.set(name, await seedPublic(alice, { name, likeCount }));
-    }
-
-    const first = await readJson(await request(bob, '/api/explore?language=ko&sort=likes&limit=2'));
-    const open = await readJson(
-      await request(
-        bob,
-        `/api/explore?language=ko&sort=likes&limit=2&cursor=${encodeURIComponent(first.nextCursor)}`,
-      ),
-    );
-
-    const url = `/api/explore?language=ko&sort=likes&limit=2&cursor=${encodeURIComponent(open.nextCursor)}`;
-
-    // Hold the walk's row the way a competing request would, and let a paging
-    // request pile up behind it. Then move the counters *while it waits* and
-    // release. Selection happens under the lock, so the page it comes back with
-    // has to be the one the new counts imply — a request that selected before
-    // taking the lock would answer with the old ordering (E before F).
-    let pending: Promise<any> | undefined;
-    try {
-      await sql.begin(async (tx) => {
-        await tx`select id from feed_cursors for update`;
-        pending = request(bob, url).then(readJson);
-        await waitForLockWaiter();
-        await tx`update plots set like_count = 99 where id = ${ids.get('F')!}::uuid`;
-      });
-    } catch (error) {
-      // The next test truncates every table, so a request left in flight here
-      // would fail that one instead of this one. Never leave one behind.
-      await pending?.catch(() => undefined);
-      throw error;
-    }
-    const answered = await pending!;
-    expect(answered.items.map((item: any) => item.name)).toEqual(['F', 'E']);
-
-    // A retry now replays that page rather than selecting again, and the snapshot
-    // carries no id twice — the evidence any unserialized append would leave.
-    expect(await readJson(await request(bob, url))).toEqual(answered);
-    const [walk] = await db.select({ seen: feedCursors.seen }).from(feedCursors);
-    expect(new Set(walk!.seen).size).toBe(walk!.seen.length);
-
-    // And the walk as a whole still yields every plot exactly once.
-    const walked = [...first.items, ...open.items, ...answered.items].map((item: any) => item.name);
-    let cursor: string | null = answered.nextCursor;
-    for (let hop = 0; hop < 10 && cursor; hop += 1) {
-      const body: any = await readJson(
-        await request(bob, `/api/explore?language=ko&sort=likes&limit=2&cursor=${encodeURIComponent(cursor)}`),
-      );
-      walked.push(...body.items.map((item: any) => item.name));
-      cursor = body.nextCursor;
-    }
-    expect(cursor).toBeNull();
-    expect([...walked].sort()).toEqual(['A', 'B', 'C', 'D', 'E', 'F']);
-  });
-
   /**
    * A like row of a chosen age. The weekly sort ranks on these rather than on
    * `like_count`, so the tests write them directly — the API only ever likes now.
@@ -11181,42 +11001,6 @@ describe('notifications', () => {
       '알림 작품',
     ]);
     expect((await listNotifications(carol)).items).toHaveLength(1);
-  });
-
-  it('mints one notification when two publishes race on the same plot', async () => {
-    const alice = await signUp('notify-race-creator@example.com');
-    const bob = await signUp('notify-race-follower@example.com');
-    await follow(bob, await userIdOf(alice));
-    const plot = await publishablePlot(alice, { name: '경쟁 발행' });
-
-    // Whether this is the first publish is a check-then-write, so both requests
-    // are made to read the unstamped row before either of them may write it:
-    // hold the plot, let both pile up on it, and only then release. Deciding on
-    // a row read before the lock would announce the same plot twice.
-    const publish = (): Promise<Response> =>
-      json(alice, `/api/plots/${plot.id}/publish`, 'POST', { publish: true });
-    let raced: Promise<Response[]> | undefined;
-    try {
-      await sql.begin(async (tx) => {
-        await tx`select id from plots where id = ${plot.id}::uuid for update`;
-        const first = publish();
-        await waitForLockWaiter();
-        const second = publish();
-        await waitForLockWaiter(2);
-        raced = Promise.all([first, second]);
-      });
-    } catch (error) {
-      // The next test truncates every table, so a request left in flight here
-      // would fail that one instead of this one.
-      await raced?.catch(() => undefined);
-      throw error;
-    }
-    expect((await raced!).map((res) => res.status)).toEqual([200, 200]);
-    // The race is decided at the enqueue: one fan-out was queued, so one round of
-    // it is all there is to run.
-    expect(await db.select().from(jobs)).toHaveLength(1);
-    await drainJobs(db, jobHandlers);
-    expect((await listNotifications(bob)).items).toHaveLength(1);
   });
 
   it('walks the list through the cursor and marks everything read at once', async () => {
@@ -12978,7 +12762,6 @@ describe('storage drivers', () => {
 
   servesEverything('local', () => storage);
   servesEverything('memory', () => stubStorage());
-  servesEverything('s3 (RustFS)', () => s3Storage!, s3Storage !== null);
 
   it('serves an asset on the authenticated API origin', async () => {
     // Chat images stay on the API origin for authenticated reads.
@@ -20056,24 +19839,4 @@ describe('file imports', () => {
     expect(await db.select().from(fileImports).where(eq(fileImports.id, old!.id))).toEqual([]);
   });
 
-  it.runIf(s3Storage !== null)('sends the parts straight to the S3 store (RustFS), at addresses good for their size', async () => {
-    const cookie = await signUp('s3-import@example.com');
-    const target = makeApp({ storage: s3Storage! });
-    const picture = bigPicture(FILE_IMPORT_PART_BYTES + 777);
-    const file = largeCharx(picture);
-    const { id, partSize } = await readJson(await start(cookie, { target: 'plot', fileName: 'big.charx', size: file.length }, target));
-    const { urls } = await readJson(await json(cookie, `/api/file-imports/${id}/parts`, 'POST', { numbers: [1, 2] }, target));
-    expect(urls[1]).toMatch(/^http:\/\/localhost:19000\/.*X-Amz-Signature=/);
-    // A part of another size than the address was signed for is the store's to refuse.
-    expect((await fetch(urls[2], { method: 'PUT', body: Buffer.from(file.subarray(0, 10)) })).ok).toBe(false);
-    await sendParts(cookie, id, file, partSize, [1, 2], target);
-    expect((await json(cookie, `/api/file-imports/${id}/complete`, 'POST', {}, target)).status).toBe(202);
-    const done = await finishedImport(cookie, id, target);
-    expect(done.status).toBe(201);
-    const plot = await readJson(done);
-    const [asset] = await db.select().from(plotAssets).where(eq(plotAssets.plotId, plot.id));
-    const stored = await s3Storage!.get(asset!.path);
-    expect(Buffer.from(await readAll(stored!.body)).equals(picture)).toBe(true);
-    expect(await s3Storage!.size(importFileKey(id, 'file'))).toBeNull();
-  });
 });

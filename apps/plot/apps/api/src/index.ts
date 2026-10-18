@@ -1,16 +1,16 @@
 import { serve } from '@hono/node-server';
-import { createDb } from '@shizue/db';
 import { createApp } from './app.js';
+import { DataDirBusy, openAppDb } from './appDb.js';
 import { createAuth } from './auth.js';
 import { createChatGPTAccounts } from './chatgptAccounts.js';
 import type { AppDeps } from './deps.js';
 import { createLocalEmbedder } from './embedder.js';
 import { createRemoteEmbedder, embedderListenConfig, serveEmbedder } from './embedderRemote.js';
 import { createHostedAuth, createSessionStore } from './hostedAuth.js';
-import { isLoopback, loadRootEnv, readConfig } from './env.js';
+import { isLoopback, loadRootEnv, readConfig, readOrCreateSecret } from './env.js';
 import { createPhoneAccess } from './tunnel.js';
 import { startJobWorker } from './jobs.js';
-import { STOP_CHANNEL, stopGenerations, stopLocalGeneration } from './generation.js';
+import { stopGenerations } from './generation.js';
 import { createBackgroundTasks, onUnhandledRejection } from './lifecycle.js';
 import { installJsonConsole } from './log.js';
 import { luaSandboxEnabled, startMetricsServer } from './metrics.js';
@@ -26,17 +26,24 @@ const config = readConfig();
 // Before anything else is said: the embedder and the Lua probe speak at startup.
 if (config.logFormat === 'json') installJsonConsole();
 
-const { db, sql } = createDb(config.databaseUrl);
+// The one handle on the app's database (PGlite in the app's folder, locked to this
+// process), brought to the newest migration before anything reads it.
+const { db, close: closeDb } = await openAppDb(config.dataDir).catch((error: unknown) => {
+  if (!(error instanceof DataDirBusy)) throw error;
+  console.error(`[api] ${error.message}`);
+  process.exit(1);
+});
+const secret = config.authSecret ?? readOrCreateSecret(config.dataDir);
 const testing = config.env['NODE_ENV'] === 'test';
 const accounts = createChatGPTAccounts(db, {
-  secret: config.authSecret,
+  secret,
   callbackPort: config.chatgptCallbackPort,
   ...(testing && config.env['CHATGPT_FAKE_OPENAI'] === '1' ? { oauth: fakeChatGPTOAuth() } : {}),
 });
 const sessions = createSessionStore(db, { secure: new URL(config.authUrl).protocol === 'https:' });
 // The email/password fixture makes many test users; it never exists outside NODE_ENV=test.
 const fixture = testing ? createAuth(db, {
-  secret: config.authSecret,
+  secret,
   baseUrl: config.authUrl,
   extraTrustedOrigins: config.authExtraTrustedOrigins,
 }) : undefined;
@@ -79,18 +86,7 @@ const deps: AppDeps = {
   suggesting: new Set<string>(),
   drafting: new Set<string>(),
   onBackgroundTask: background.track,
-  // The reader's stop for a reply another instance is streaming (`stopChatGeneration`).
-  stopSignal: {
-    publish: async (chatId) => {
-      await sql.notify(STOP_CHANNEL, chatId);
-    },
-  },
 };
-// Every instance hears every stop and stops its own stream of that chat, if it has one.
-// postgres.js keeps this on a connection of its own and listens again after a reconnect.
-sql.listen(STOP_CHANNEL, (chatId) => stopLocalGeneration(deps, chatId)).catch((error: unknown) => {
-  console.error('[api] not listening for stops relayed from other instances', error);
-});
 // Lazy: the model loads on the first search, not here (`embedder.ts`). With
 // EMBEDDER_URL another process holds it, for every instance (`embedderRemote.ts`).
 const remoteEmbedder = Boolean(config.env['EMBEDDER_URL']?.trim());
@@ -166,6 +162,8 @@ function shutdown(code: number): void {
     // instances' requests too: onnxruntime does not survive an exit around it.
     await embedderListener?.close();
     await deps.embedder?.close();
+    // The database last of all, once nothing writes: PGlite flushes its files on close.
+    await closeDb();
   })()
     .catch((error: unknown) => console.error('[api] shutdown failed', error))
     .finally(() => process.exit(exitCode));

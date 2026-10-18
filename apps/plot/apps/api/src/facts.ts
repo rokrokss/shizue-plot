@@ -302,8 +302,8 @@ export async function extractFacts(deps: AppDeps, embedder: Embedder, input: Ext
         .where(eq(chatSummaries.id, input.summary.id));
       if (!summary) return;
       // A millisecond apart, so the extraction's order is the order they are listed
-      // and sent in — by the database's clock, the column's default, as an app
-      // clock behind it would list them ahead of facts written before them.
+      // and sent in — by the database's clock, the column's default, so that every
+      // fact's time comes from the one clock its order is read by.
       const rows =
         written.length === 0
           ? []
@@ -540,11 +540,11 @@ export async function selectFacts(deps: AppDeps, input: FactSelectionInput): Pro
     candidateIds.map((id) => sql`${id}::uuid`),
     sql`, `,
   );
-  const pairs = await deps.db.execute<{ a: string; b: string; score: number }>(sql`
+  const pairs = (await deps.db.execute<{ a: string; b: string; score: number }>(sql`
     select a.id as a, b.id as b, 1 - (a.embedding <=> b.embedding) as score
     from ${memories} a join ${memories} b on a.id < b.id
     where a.id in (${idList}) and b.id in (${idList}) and a.model = ${model} and b.model = ${model}
-  `);
+  `)).rows;
   const near = new Set(
     [...pairs]
       .filter((pair) => Number(pair.score) >= FACT_DUPLICATE_SIMILARITY)

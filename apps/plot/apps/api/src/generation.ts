@@ -1296,44 +1296,18 @@ export async function stopGenerations(deps: AppDeps, graceMs: number): Promise<v
   await stopAll([...deps.generationStreams], graceMs);
 }
 
-/** The Postgres channel a reader's stop reaches the other instances on (`AppDeps.stopSignal`); its payload is the chat id. */
-export const STOP_CHANNEL = 'shizue_stop';
-
-/** How often a stop relayed to another instance looks whether the chat's slot is free yet. */
-const RELAYED_STOP_POLL_MS = 100;
-
 /**
  * The reader's stop (`POST /api/chats/:id/stop`): the chat's generation keeps what
  * it had as a stopped reply, and this answers once that is stored and the slot is
  * free, so the page's next read finds it. A dropped connection no longer stops a
  * reply, so this is the only way a reader does. Nothing running is nothing to do.
- *
- * The stream may be another instance's — the reader's stop and their send need
- * not reach the same one. Then the chat's claim (`chats.generating_at`) is still
- * held, and the stop goes to every instance on `STOP_CHANNEL`; the one streaming
- * it stops it as its own (`stopLocalGeneration`), and this answers once the slot
- * is given back, or at `graceMs` — a claim whose holder died is not one to wait
- * out, it goes stale on its own.
+ * The app is one process, so every stream of the chat is this one's.
  */
 export async function stopChatGeneration(deps: AppDeps, chatId: string, graceMs: number): Promise<void> {
-  const open = [...deps.generationStreams].filter((generation) => generation.chatId === chatId);
-  if (open.length > 0 || !deps.stopSignal) return stopAll(open, graceMs);
-  if (!(await slotHeld(deps, chatId))) return;
-  await deps.stopSignal.publish(chatId);
-  const until = Date.now() + graceMs;
-  while (Date.now() < until && (await slotHeld(deps, chatId))) {
-    await new Promise((resolve) => setTimeout(resolve, RELAYED_STOP_POLL_MS));
-  }
-}
-
-/** What a stop relayed from another instance asks of this one: its streams of the chat stopped, kept as stopped replies. */
-export function stopLocalGeneration(deps: AppDeps, chatId: string): void {
-  for (const generation of deps.generationStreams) if (generation.chatId === chatId) generation.stop();
-}
-
-async function slotHeld(deps: AppDeps, chatId: string): Promise<boolean> {
-  const [row] = await deps.db.select({ at: chats.generatingAt }).from(chats).where(eq(chats.id, chatId)).limit(1);
-  return Boolean(row?.at);
+  await stopAll(
+    [...deps.generationStreams].filter((generation) => generation.chatId === chatId),
+    graceMs,
+  );
 }
 
 async function stopAll(open: OpenGeneration[], graceMs: number): Promise<void> {

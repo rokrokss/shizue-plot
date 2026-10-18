@@ -1,6 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
-import { readFileSync } from 'node:fs';
-import { parseEnv } from 'node:util';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { STAND_IN_ID } from './shizueStandIn.js';
 
 // Overridable so a containerized run (e.g. generating another platform's visual
@@ -9,42 +10,22 @@ const WEB_URL = process.env['E2E_WEB_URL'] ?? 'http://localhost:13000';
 const API_URL = process.env['E2E_API_URL'] ?? 'http://localhost:8787';
 
 /**
- * The database the suite's API runs on: the scratch `TEST_DATABASE_URL`, from the
- * shell or else `apps/plot/.env`. Left alone the API would load that file's
- * `DATABASE_URL` — the dev database the owner tests on — and every run would
- * leave its accounts and plots in their catalogue. The `_test` name is the mark
- * the API suite asks for too, and that suite truncates this database on every
- * test, so the two must not run at the same time.
+ * The app's folder the suite's API runs on: a new empty one per run, so a run
+ * never touches the owner's own works (apps/plot/data/app) and starts from a fresh
+ * database. Set once in this process; Playwright's workers inherit it.
  */
-function scratchDatabaseUrl(): string {
-  let url = process.env['TEST_DATABASE_URL'];
-  if (!url) {
-    try {
-      url = parseEnv(readFileSync(new URL('../../.env', import.meta.url), 'utf8'))['TEST_DATABASE_URL'];
-    } catch {
-      // No .env to read: the error below says what to set.
-    }
-  }
-  if (!url) {
-    throw new Error('TEST_DATABASE_URL is not set: the browser suite runs on the scratch database (README §Testing).');
-  }
-  // Only the name is quoted back: the URL carries credentials.
-  const name = new URL(url).pathname.slice(1);
-  if (!name.endsWith('_test')) {
-    throw new Error(`TEST_DATABASE_URL names database "${name}", which is not a scratch one ending in \`_test\`.`);
-  }
-  return url;
-}
+process.env['E2E_DATA_DIR'] ??= mkdtempSync(join(tmpdir(), 'shizue-e2e-'));
+const DATA_DIR = process.env['E2E_DATA_DIR'];
 
 /**
- * Smoke suite against the real stack (docker Postgres + Hono API + Next).
+ * Smoke suite against the real stack (Hono API on its own PGlite folder + Next).
  *
  * The web server runs `next dev` rather than a production build: the message
  * catalogs (`apps/web/messages/*.json`) are then read from disk on demand, so a
  * catalog edit does not need a rebuild before the locale assertions see it.
  * First-hit route compilation is slow, hence the generous timeouts below.
  *
- * The API migrates the scratch database and runs on it. The suite writes there
+ * The API migrates the run's fresh folder and runs on it. The suite writes there
  * with a unique account per run and never truncates anything itself.
  */
 export default defineConfig({
@@ -66,9 +47,10 @@ export default defineConfig({
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: [
     {
-      command: 'pnpm --filter @shizue/db db:migrate && pnpm --filter @shizue/api exec tsx src/index.ts',
+      // The API migrates its database itself, at the start.
+      command: 'pnpm --filter @shizue/api exec tsx src/index.ts',
       env: {
-        DATABASE_URL: scratchDatabaseUrl(),
+        SHIZUE_DATA_DIR: DATA_DIR,
         NODE_ENV: 'test', API_PORT: new URL(API_URL).port, BETTER_AUTH_URL: WEB_URL,
         // extension.spec.ts: the Shizue stand-in's loopback port, and OpenAI stood in for.
         CHATGPT_CALLBACK_PORT: process.env['E2E_CALLBACK_PORT'] ?? '47801', CHATGPT_FAKE_OPENAI: '1',

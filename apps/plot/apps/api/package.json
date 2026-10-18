@@ -14,6 +14,7 @@
     "fix:member-scripts": "tsx src/maintenance/fixMemberScripts.ts",
     "fix:localize-assets": "tsx src/maintenance/fixLocalizeAssets.ts",
     "fix:lore-aliases": "tsx src/maintenance/fixLoreAliases.ts",
+    "import:postgres": "tsx src/maintenance/importPostgres.ts",
     "embedder:fetch": "tsx src/maintenance/fetchEmbedder.ts",
     "embedder:publish": "tsx src/maintenance/publishEmbedder.ts",
     "embedder:serve": "tsx src/embedderServe.ts"
@@ -37,6 +38,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
+    "postgres": "3.4.9",
     "tsx": "^4.23.6",
     "typescript": "^5.9.3",
     "vitest": "^4.1.11"

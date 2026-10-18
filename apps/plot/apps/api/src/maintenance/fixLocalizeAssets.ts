@@ -2,9 +2,8 @@
  * Brings in what plots imported before the import did so load from other hosts
  * (`localizeAssets.ts`): every plot's openings, stylesheets, background and
  * display scripts, and its modules', fetched and rewritten as an import today
- * would. Against DATABASE_URL — apps/plot/.env's unless the environment says
- * otherwise — and the storage the API is configured with (STORAGE_DRIVER,
- * UPLOAD_DIR or the S3 settings), so the files land where the API reads them.
+ * would. Against the app's folder (SHIZUE_DATA_DIR), its database and its files,
+ * so the files land where the API reads them — never while the app runs.
  *
  *   pnpm --filter @shizue/api fix:localize-assets                  dry run: lists what it would fetch
  *   pnpm --filter @shizue/api fix:localize-assets --apply          fetches and writes it
@@ -14,8 +13,9 @@
  * asset named for an address is reused, and a rewritten reference is no longer
  * one to another host.
  */
-import { createDb, plots } from '@shizue/db';
+import { plots } from '@shizue/db';
 import { asc } from 'drizzle-orm';
+import { openAppDb } from '../appDb.js';
 import { loadRootEnv, readConfig } from '../env.js';
 import { createRemoteFetch, localizePlot } from '../localizeAssets.js';
 import { createStorage } from '../storage.js';
@@ -34,11 +34,10 @@ if (unknown.length > 0 || (at >= 0 && !only) || (rest.includes('--apply') && res
 const apply = rest.includes('--apply');
 
 const config = readConfig();
-// Which database, without the credentials the URL carries.
-const target = new URL(config.databaseUrl);
-console.log(`${apply ? 'Applying to' : 'Dry run against'} ${target.host}${target.pathname}`);
+console.log(`${apply ? 'Applying to' : 'Dry run against'} ${config.dataDir}`);
 
-const { db, close } = createDb(config.databaseUrl);
+// Its lock refuses a second process: never while the app runs.
+const { db, close } = await openAppDb(config.dataDir);
 const storage = createStorage(config.storage);
 const remoteFetch = createRemoteFetch({ ownOrigins: [config.authUrl, ...config.remoteOrigins, ...(config.apiOrigin ? [config.apiOrigin] : [])] });
 try {

@@ -2,9 +2,9 @@
  * Writes the Korean lore aliases (`loreAliases.ts`) of works made before the
  * alias pass existed: every plot whose language is not Korean, whose book has
  * (next to) no Korean keys and which has a keyed entry without its row — on its
- * creator's auxiliary model, as the API does after an edit. Against
- * DATABASE_URL — apps/plot/.env's unless the environment says otherwise — with
- * BETTER_AUTH_SECRET, which opens the creators' ChatGPT sign-ins.
+ * creator's auxiliary model, as the API does after an edit. Against the app's
+ * folder (SHIZUE_DATA_DIR) — never while the app runs — with its secret, which
+ * opens the ChatGPT sign-ins.
  *
  *   pnpm --filter @shizue/api fix:lore-aliases                 dry run: lists the plots and the calls each needs
  *   pnpm --filter @shizue/api fix:lore-aliases --apply         writes them, one plot at a time
@@ -20,10 +20,11 @@
  * again — its keys and its secondary keys in the one call — and drops its old row.
  */
 import { aliasBatches, LORE_ALIAS_LANGUAGE } from '@shizue/core';
-import { createDb, loreEntryAliases, plots } from '@shizue/db';
+import { loreEntryAliases, plots } from '@shizue/db';
 import { and, asc, eq, ne } from 'drizzle-orm';
 import { createChatGPTAccounts } from '../chatgptAccounts.js';
-import { loadRootEnv, readConfig } from '../env.js';
+import { openAppDb } from '../appDb.js';
+import { loadRootEnv, readConfig, readOrCreateSecret } from '../env.js';
 import { createSessionStore } from '../hostedAuth.js';
 import { aliasableEntries, aliasHash, aliasPlotLore, loadWorkLore, loreAliasesEnabled } from '../loreAliases.js';
 
@@ -45,12 +46,14 @@ if (!loreAliasesEnabled(config.env)) {
   console.error('LORE_ALIASES=off: the aliases are turned off, so there is nothing to write.');
   process.exit(2);
 }
-// Which database, without the credentials the URL carries.
-const target = new URL(config.databaseUrl);
-console.log(`${apply ? 'Applying to' : 'Dry run against'} ${target.host}${target.pathname}`);
+console.log(`${apply ? 'Applying to' : 'Dry run against'} ${config.dataDir}`);
 
-const { db, close } = createDb(config.databaseUrl);
-const accounts = createChatGPTAccounts(db, { secret: config.authSecret, callbackPort: config.chatgptCallbackPort });
+// Its lock refuses a second process: never while the app runs.
+const { db, close } = await openAppDb(config.dataDir);
+const accounts = createChatGPTAccounts(db, {
+  secret: config.authSecret ?? readOrCreateSecret(config.dataDir),
+  callbackPort: config.chatgptCallbackPort,
+});
 const deps = {
   db,
   env: config.env,

@@ -13,8 +13,7 @@
     "test": "pnpm --filter @shizue/contracts test && pnpm --filter @shizue/plot test",
     "test:e2e": "pnpm --filter @shizue/plot test:e2e",
     "typecheck": "tsc -p tsconfig.json && pnpm --filter @shizue/plot typecheck",
-    "db:generate": "pnpm --filter @shizue/plot db:generate",
-    "db:migrate": "pnpm --filter @shizue/plot db:migrate"
+    "db:generate": "pnpm --filter @shizue/plot db:generate"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",

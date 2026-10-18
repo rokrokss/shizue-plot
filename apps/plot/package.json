@@ -13,9 +13,7 @@
     "test": "vitest run",
     "test:e2e": "pnpm --filter @shizue/e2e test",
     "typecheck": "tsc -p tsconfig.json && pnpm --filter @shizue/web typecheck",
-    "db:generate": "pnpm --filter @shizue/db db:generate",
-    "db:migrate": "pnpm --filter @shizue/db db:migrate",
-    "db:studio": "pnpm --filter @shizue/db db:studio"
+    "db:generate": "pnpm --filter @shizue/db db:generate"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",

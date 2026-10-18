@@ -18,14 +18,13 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate",
-    "db:studio": "drizzle-kit studio"
+    "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "@electric-sql/pglite-pgvector": "0.0.9",
     "@shizue/core": "workspace:*",
-    "drizzle-orm": "^0.45.2",
-    "postgres": "^3.4.9"
+    "drizzle-orm": "^0.45.2"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",

@@ -34,10 +34,12 @@ changing what it describes.
 
 ## Environment and commands
 
-Node 26+ (`.nvmrc`) and pnpm 10.28.2. `make dev` starts Docker's PostgreSQL (port 15433)
-and RustFS, an S3 stand-in (19000), builds the libraries, then serves the web
-app on 13000 and the API on 8787. `make stop` stops the app. Settings live in
-`apps/plot/.env`, copied from `.env.example`.
+Node 26+ (`.nvmrc`) and pnpm 10.28.2. Nothing else: no Docker. The database is
+PGlite (Postgres in WebAssembly) and the files are plain files, both in the
+app's folder, `SHIZUE_DATA_DIR` (default `apps/plot/data/app`). `make dev` builds the
+libraries, then serves the web app on 13000 and the API on 8787; the API
+migrates its database at every start. `make stop` stops the app. Settings live
+in `apps/plot/.env`, copied from `.env.example`.
 
 ```sh
 pnpm install
@@ -52,8 +54,8 @@ make e2e
 The second line builds the libraries. Their exports point at `dist/`, which a
 fresh checkout lacks. Without it the typecheck fails with TS2307 errors that
 look like broken imports. The next two lines run one unit file and one browser
-spec. `pnpm test` runs every unit suite. `make e2e` starts the containers, builds
-the libraries and runs the whole browser suite.
+spec. `pnpm test` runs every unit suite. `make e2e` builds the libraries and runs
+the whole browser suite.
 
 ## Testing
 
@@ -66,19 +68,19 @@ Keep regression tests for authentication, security, data integrity and pending
 operations. Skip tests for static copy, CSS classes, trivial wrappers, or
 behavior another layer already covers.
 
-The suites share scratch databases, so plan runs around them:
+The suites share nothing, so they may run side by side:
 
-- The API suite truncates `TEST_DATABASE_URL` before every test. The browser
-  suite's API migrates the same database and writes to it. Both refuse a name
-  that doesn't end in `_test`. Run only one suite at a time against a given
-  scratch database, counting suites in other worktrees.
-- `plot_test` is the default. `plot2_test` and up exist for parallel work. To
-  use one, point `TEST_DATABASE_URL` in that worktree's own `apps/plot/.env` at
-  a free one.
-- Seed data and hand-test only on a scratch database. The dev database `plot`
-  holds the owner's own works, and test rows there look like broken imports.
-- `TEST_S3_REQUIRED=1` makes the S3 tests fail instead of skipping when RustFS
-  is down.
+- The API suite runs on an in-memory PGlite of its own, one per test file,
+  truncated before every test. The browser suite's API runs on a new empty
+  app folder in the system's temp directory, made for each run.
+- PGlite opens one folder from one process only (`app.lock`). Never point a
+  second process, a maintenance command or a test at a folder an app is
+  running on.
+- Seed data and hand-test only in a folder of your own (`SHIZUE_DATA_DIR`).
+  `apps/plot/data/app` in the main checkout holds the owner's own works, and
+  test rows there look like broken imports.
+- PGlite's clock counts milliseconds: two rows written in the same millisecond
+  share their `created_at`. A test that checks order lets the clock tick first.
 
 The browser suite starts its own API and web app on main's dev ports (8787 and
 13000) and the sign-in callback port (47801). It refuses to reuse a running
@@ -86,7 +88,7 @@ server. In main, run `make stop` first. Outside main, set `E2E_API_URL`,
 `E2E_WEB_URL` and `E2E_CALLBACK_PORT` to free ports.
 
 Sign-in needs the Shizue browser extension. To look at a logged-in screen, run
-the API with `NODE_ENV=test` on offset ports against a scratch database. Test
+the API with `NODE_ENV=test` on offset ports with a fresh `SHIZUE_DATA_DIR`. Test
 mode allows `POST /api/auth/sign-up/email` and the `echo/echo` model.
 
 Visual baselines in `apps/plot/apps/e2e/tests/visual.spec.ts-snapshots/` come
@@ -97,16 +99,10 @@ the `mcr.microsoft.com/playwright` image whose version matches
 ## Migrations
 
 `pnpm db:generate` writes the next numbered migration into
-`apps/plot/packages/db/drizzle/`. Before landing one, apply it to the dev
-database and to every scratch database. Main's dev server and the next test
-run both expect the new schema.
-
-```sh
-for db in $(docker compose exec -T postgres psql -U plot -d plot -Atc \
-    "select datname from pg_database where datname like 'plot%'"); do
-  DATABASE_URL=postgres://plot:plot@localhost:15433/$db pnpm db:migrate
-done
-```
+`apps/plot/packages/db/drizzle/`. Nothing applies it by hand: the app migrates
+its folder at every start, the API suite migrates its in-memory database, and
+the browser suite's API its fresh folder. Main's dev data takes a new migration
+the next time main's app starts, so restart it after landing one.
 
 ## Product rules
 
@@ -147,6 +143,6 @@ done
   the tool's background-completion notice, with a time limit.
   `pgrep -f <pattern>` also matches other shells waiting on the same pattern,
   so two such loops can wait on each other indefinitely.
-- The dev machine has 24 GB shared with Docker and other sessions. Run vitest
+- The dev machine has 24 GB shared with other sessions. Run vitest
   with `--maxWorkers=2` and Playwright with `--workers=1`, keep at most one Next
   dev server per agent, and stop servers once the check is done.

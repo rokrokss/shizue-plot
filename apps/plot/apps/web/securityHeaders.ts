@@ -19,28 +19,11 @@ const THEME_SCRIPT_HASH = `'sha256-${createHash('sha256').update(THEME_SCRIPT).d
 const REALM_ORIGIN = 'https://realm.risuai.net';
 
 /**
- * Where the browser uploads a card or module file's parts (`lib/fileImport.ts`):
- * the S3 store itself, at the address the API presigns — the public endpoint if
- * there is one, path-style or with the bucket in the host as `S3_FORCE_PATH_STYLE`
- * says, and AWS's own regional host without an endpoint. The local driver takes
- * them at the API, on our origin.
- */
-export function storeOrigin(env: Env): string | null {
-  if (env['STORAGE_DRIVER'] !== 's3') return null;
-  const bucket = env['S3_BUCKET'];
-  const endpoint = env['S3_PUBLIC_ENDPOINT'] || env['S3_ENDPOINT'];
-  if (!endpoint) return bucket ? `https://${bucket}.s3.${env['S3_REGION'] ?? 'us-east-1'}.amazonaws.com` : null;
-  const url = new URL(endpoint);
-  const pathStyle = env['S3_FORCE_PATH_STYLE'] === 'true' || env['S3_FORCE_PATH_STYLE'] === '1';
-  return pathStyle || !bucket ? url.origin : `${url.protocol}//${bucket}.${url.host}`;
-}
-
-/**
  * The page's policy. A card's HTML and CSS are drawn into the page itself, and
  * the sanitizer holds every address in them to our own origin (`lib/sanitizeHtml.ts`);
  * this is the browser holding them there too, should a rule of the sanitizer's
  * let one through: pictures, music, fonts and connections load from us, with
- * Realm and the upload store the only others, and no `<object>`, `<base>` or form
+ * Realm the only other — a file's parts upload to the API, on our origin — and no `<object>`, `<base>` or form
  * that leaves.
  *
  * Scripts run only from us: our files, the inline scripts Next writes into the
@@ -54,7 +37,7 @@ export function storeOrigin(env: Env): string | null {
  * server's error stacks with it.
  */
 export function contentSecurityPolicy(env: Env, nonce: string): string {
-  const connect = ["'self'", REALM_ORIGIN, storeOrigin(env)].filter(Boolean);
+  const connect = ["'self'", REALM_ORIGIN];
   const evaluate = env['NODE_ENV'] === 'development' ? " 'unsafe-eval'" : '';
   return [
     "default-src 'self'",

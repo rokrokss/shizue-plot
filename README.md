@@ -21,8 +21,10 @@ See [the architecture](apps/plot/docs/ARCHITECTURE.md) for chat behavior and
 
 ## Quickstart
 
-Node 26+ (`.nvmrc`) and pnpm 10.28.2 are required. Docker provides PostgreSQL 17 with
-pgvector and RustFS (an S3-compatible store) for local development.
+Node 26+ (`.nvmrc`) and pnpm 10.28.2 are required, and nothing else: the
+database is PGlite (PostgreSQL 17 compiled to WebAssembly, with pgvector) and
+the files are plain files, both in the app's folder — `SHIZUE_DATA_DIR`,
+`apps/plot/data/app` by default. The API migrates the database at every start.
 
 ```sh
 pnpm install
@@ -48,26 +50,31 @@ it (ARCHITECTURE §7.3).
 
 Open http://localhost:13000 in Chrome with [Shizue](https://chromewebstore.google.com/detail/mpcbgfkoholfgapcgcmfjobnfcbnfanm) installed (below).
 Next.js forwards `/api/*` to Hono on port 8787. `make stop` stops the app
-processes; `make infra-down` stops the containers. The database and media
-volumes persist across restarts.
+processes. The app's folder persists across restarts; one process at a time may
+open it (`app.lock`), so stop the app before running a maintenance command on it.
+
+### Moving from the Postgres setup
+
+A checkout from before 2026-10-18 kept its data in Docker's PostgreSQL and the
+RustFS bucket. With those containers still running, copy everything into an
+empty app folder once:
+
+```sh
+S3_BUCKET=shizue-media S3_ENDPOINT=http://localhost:19000 S3_ACCESS_KEY_ID=shizue \
+  S3_SECRET_ACCESS_KEY=shizue-secret S3_FORCE_PATH_STYLE=true \
+  pnpm --filter @shizue/api import:postgres -- \
+  --from postgres://plot:plot@localhost:15433/plot --uploads ./data/uploads --s3
+```
+
+It keeps the old `BETTER_AUTH_SECRET` as the folder's secret, so the ChatGPT
+sign-in still opens, and only reads the source.
 
 ### Card and module imports
 
-A reader's browser uploads a card or module file in 8 MB parts straight into
-storage, and a job in the API reads it back and imports it (ARCHITECTURE §10
-파일 임포트); the file never passes through Next.js or the API's request body.
-Under the local driver the parts come to the API instead, which streams each
-to disk. With `STORAGE_DRIVER=s3` the bucket needs:
-
-- CORS: `PUT` from the web origin (`AllowedOrigins` the site's origin,
-  `AllowedMethods: ["PUT"]`, `AllowedHeaders: ["*"]`).
-- A lifecycle rule on the `imports/` prefix: expire objects after 2 days and
-  abort incomplete multipart uploads after 1 day, for imports nobody finished.
-
-The compose `s3-init` sets both on the RustFS for `http://localhost:13000`.
-`S3_PUBLIC_ENDPOINT` is for a deployment whose API reaches the store at an
-address browsers cannot; `IMPORT_WORKERS` (default 2) is how many imports one
-API process reads at once.
+A reader's browser uploads a card or module file in 8 MB parts to the API,
+which streams each to disk, and a job in the API reads it back and imports it
+(ARCHITECTURE §10 파일 임포트). `IMPORT_WORKERS` (default 2) is how many imports
+the API reads at once.
 
 ## Sign in with ChatGPT
 
@@ -149,22 +156,10 @@ pnpm test
 pnpm test:e2e
 ```
 
-The API unit suite reads `TEST_DATABASE_URL` from `apps/plot/.env`. It must name
-a separate scratch database ending in `_test`; the suite truncates it before
-each test. Create and migrate it before the first run:
-
-```sh
-docker compose exec -T postgres psql -U plot -d plot -c 'CREATE DATABASE plot_test'
-DATABASE_URL=postgres://plot:plot@localhost:15433/plot_test pnpm db:migrate
-TEST_S3_REQUIRED=1 pnpm test
-```
-
-The S3 tests use the compose RustFS on port 19000. `TEST_S3_REQUIRED=1` makes an unavailable
-store fail instead of skip. Browser tests serve the API and web app with the
-test-only echo model (`NODE_ENV=test` on the API); they do not contact an AI
-provider. Their API runs on the same scratch `TEST_DATABASE_URL`, which it migrates
-on start, never on the app's `DATABASE_URL`; since `pnpm test` truncates that
-database, don't run the two at once. Legacy email/password sessions exist only in this test mode to isolate
+The API unit suite runs on an in-memory PGlite of its own and needs no setup.
+Browser tests serve the API and web app with the test-only echo model
+(`NODE_ENV=test` on the API); they do not contact an AI provider. Their API runs
+on a new empty app folder in the system's temp directory, never on yours. Legacy email/password sessions exist only in this test mode to isolate
 test fixtures; the normal app does not serve those endpoints. The ChatGPT login
 spec mocks OAuth to exercise the single-button entrance and automatic redirect.
 Stop any normal instance on the test ports before running browser tests; the suite
@@ -172,10 +167,10 @@ never reuses a server with a real account connection.
 
 ## Migrations
 
-`pnpm db:generate` creates migrations; `pnpm db:migrate` applies them to
-`DATABASE_URL`. The character-chat schema starts from a single initial migration,
-including the pgvector extension. Existing databases must be reset before applying
-it; upgrades from the removed products are unsupported.
+`pnpm db:generate` creates migrations. Nothing applies them by hand: the API
+migrates the app's folder at every start. The character-chat schema starts from
+a single initial migration, including the pgvector extension; upgrades from the
+removed products are unsupported.
 
 ## Operations
 
