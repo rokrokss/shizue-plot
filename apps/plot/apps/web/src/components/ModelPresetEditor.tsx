@@ -32,6 +32,9 @@ type Draft = {
   stop: string;
   extraHeaders: string;
   extraBody: string;
+  /** The text formats' instruct template; empty is the default (ChatML). */
+  instructTemplate: string;
+  jinjaTemplate: string;
   capabilities: ModelCapabilities;
 };
 
@@ -50,6 +53,8 @@ const draftOf = (preset: ModelPreset | undefined, formats: ModelFormats): Draft 
   stop: (preset?.params.stop ?? []).join('\n'),
   extraHeaders: preset?.params.extraHeaders ? JSON.stringify(preset.params.extraHeaders, null, 2) : '',
   extraBody: preset?.params.extraBody ? JSON.stringify(preset.params.extraBody, null, 2) : '',
+  instructTemplate: preset?.params.instructTemplate ?? '',
+  jinjaTemplate: preset?.params.jinjaTemplate ?? '',
   capabilities: preset?.capabilities ?? {},
 });
 
@@ -99,6 +104,10 @@ export function ModelPresetEditor({
     ? credential.baseUrl ?? formats.providers.find((provider) => provider.id === credential.provider)?.baseUrl ?? ''
     : '';
   const listedModel = listed?.find((entry) => entry.id === draft.model);
+  /** The local servers' usual addresses that speak this format. */
+  const endpoints = formats.localEndpoints.filter((entry) => entry.formats.includes(format.id));
+  /** The flags as they stand: the preset's own over the format's (RisuAI's, for its models). */
+  const flags: ModelCapabilities = { ...format.reformat, ...draft.capabilities };
   /** A ChatGPT model's own efforts where the list says them; RisuAI's words otherwise. */
   const efforts = listedModel?.reasoningEfforts ?? formats.reasoningEfforts;
   const formatLabel = (formatId: string): string => (t.has(`formats.${formatId}`) ? t(`formats.${formatId}`) : formatId);
@@ -141,6 +150,10 @@ export function ModelPresetEditor({
       else params[parameter] = Number(raw);
     }
     if (!onPlan && draft.maxTokens.trim()) params.maxTokens = Number(draft.maxTokens.trim());
+    if (format.instructTemplate && draft.instructTemplate) {
+      params.instructTemplate = draft.instructTemplate;
+      if (draft.instructTemplate === 'jinja' && draft.jinjaTemplate.trim()) params.jinjaTemplate = draft.jinjaTemplate;
+    }
     const stop = draft.stop.split('\n').filter((line) => line.length > 0);
     if (stop.length > 0) params.stop = stop;
     if (!onPlan) {
@@ -260,17 +273,17 @@ export function ModelPresetEditor({
                 id={`${id}-endpoint`}
                 value={draft.endpoint}
                 list={`${id}-endpoints`}
-                placeholder="http://localhost:1234/v1"
+                placeholder={format.defaultBaseUrl ?? endpoints[0]?.endpoint ?? 'http://localhost:1234/v1'}
                 inputMode="url"
                 onChange={(event) => set({ endpoint: event.target.value })}
               />
               <datalist id={`${id}-endpoints`}>
-                {formats.localEndpoints.map((entry) => (
+                {endpoints.map((entry) => (
                   <option key={entry.id} value={entry.endpoint}>{entry.label}</option>
                 ))}
               </datalist>
             </>,
-            t('endpointHint'),
+            format.defaultBaseUrl ? t('endpointDefault', { url: format.defaultBaseUrl }) : t('endpointHint'),
           )
         : null}
       {field(
@@ -294,6 +307,29 @@ export function ModelPresetEditor({
           <Button size="sm" className="h-11 shrink-0" busy={listing} onClick={() => void loadModels()}>{t('loadModels')}</Button>
         </div>,
       )}
+      {format.instructTemplate
+        ? field(
+            'instructTemplate',
+            t('instructTemplate'),
+            <Select
+              id={`${id}-instructTemplate`}
+              value={draft.instructTemplate}
+              onChange={(event) => set({ instructTemplate: event.target.value })}
+            >
+              <option value="">{t('instructTemplateDefault')}</option>
+              {formats.instructTemplates.filter((name) => name !== 'jinja').map((name) => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+              <option value="jinja">{t('instructTemplateJinja')}</option>
+            </Select>,
+            t('instructTemplateHint'),
+          )
+        : null}
+      {format.instructTemplate && draft.instructTemplate === 'jinja' ? (
+        <Field label={t('jinjaTemplate')} hint={t('jinjaTemplateHint')}>
+          <TextArea rows={4} spellCheck={false} value={draft.jinjaTemplate} onChange={(event) => set({ jinjaTemplate: event.target.value })} />
+        </Field>
+      ) : null}
 
       {parameters.length > 0 || !onPlan ? (
         <fieldset className="space-y-3">
@@ -391,14 +427,14 @@ export function ModelPresetEditor({
                   checked={draft.capabilities.vision === true}
                   onChange={(vision) => set({ capabilities: { ...draft.capabilities, vision } })}
                 />
-                {format.id === 'openai-chat' ? (
+                {format.reformat ? (
                   <>
                     {field(
                       'systemPrompt',
                       t('systemPrompt'),
                       <Select
                         id={`${id}-systemPrompt`}
-                        value={draft.capabilities.systemPrompt ?? 'full'}
+                        value={flags.systemPrompt ?? 'full'}
                         onChange={(event) => set({ capabilities: { ...draft.capabilities, systemPrompt: event.target.value as ModelCapabilities['systemPrompt'] } })}
                       >
                         {(['full', 'first', 'none'] as const).map((mode) => (
@@ -408,12 +444,12 @@ export function ModelPresetEditor({
                     )}
                     <Checkbox
                       label={t('alternateRoles')}
-                      checked={draft.capabilities.alternateRoles === true}
+                      checked={flags.alternateRoles === true}
                       onChange={(alternateRoles) => set({ capabilities: { ...draft.capabilities, alternateRoles } })}
                     />
                     <Checkbox
                       label={t('startWithUser')}
-                      checked={draft.capabilities.startWithUser === true}
+                      checked={flags.startWithUser === true}
                       onChange={(startWithUser) => set({ capabilities: { ...draft.capabilities, startWithUser } })}
                     />
                   </>

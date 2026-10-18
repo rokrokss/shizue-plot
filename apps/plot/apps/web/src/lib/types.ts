@@ -385,6 +385,9 @@ export interface ModelParams extends Partial<Record<Exclude<ModelParameter, 'rea
   stop?: string[];
   extraHeaders?: Record<string, string>;
   extraBody?: Record<string, unknown>;
+  /** A text format's instruct template: a built-in's name, or `jinja` for `jinjaTemplate`. */
+  instructTemplate?: string;
+  jinjaTemplate?: string;
 }
 
 /** What a preset's model can take: pictures, and RisuAI's flags for a strict chat template. */
@@ -415,10 +418,10 @@ export interface ModelBinding {
   sub: string | null;
 }
 
-/** An API key or the ChatGPT connection (`/api/credentials`) — never its secret, only a masked hint. */
+/** An API key, AWS keys, a service account or the ChatGPT connection (`/api/credentials`) — never its secret, only a masked hint. */
 export interface Credential {
   id: string;
-  kind: 'api_key' | 'chatgpt' | string;
+  kind: 'api_key' | 'aws' | 'gcp_service_account' | 'chatgpt' | string;
   provider: string;
   label: string;
   baseUrl: string | null;
@@ -438,11 +441,25 @@ export interface ModelFormats {
     chatgptParameters: ModelParameter[] | null;
     key: 'required' | 'optional';
     defaultBaseUrl: string | null;
+    /** RisuAI's flags for its models, which the preset's own lay over; null where the format places system turns itself. */
+    reformat: ModelCapabilities | null;
+    /** Whether a preset on it picks an instruct template. */
+    instructTemplate: boolean;
   }[];
-  providers: { id: string; label: string; baseUrl: string | null; formats: string[]; key: 'required' | 'optional' }[];
-  localEndpoints: { id: string; label: string; endpoint: string }[];
+  providers: {
+    id: string;
+    label: string;
+    baseUrl: string | null;
+    formats: string[];
+    key: 'required' | 'optional';
+    /** What its credential holds: a key, AWS keys, or a Google service account. */
+    kind: 'api_key' | 'aws' | 'gcp_service_account';
+  }[];
+  localEndpoints: { id: string; label: string; endpoint: string; formats: string[] }[];
   reasoningEfforts: string[];
   verbosities: string[];
+  /** The instruct templates a text format may name, `jinja` last. */
+  instructTemplates: string[];
 }
 
 /**

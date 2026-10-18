@@ -36,17 +36,22 @@ const { ModelPresetEditor } = await import('../src/components/ModelPresetEditor'
 
 const FORMATS: ModelFormats = {
   formats: [
-    { id: 'openai-chat', parameters: ['temperature', 'topP', 'minP', 'reasoningEffort'], chatgptParameters: null, key: 'optional', defaultBaseUrl: null },
-    { id: 'openai-responses', parameters: ['temperature', 'topP', 'reasoningEffort', 'verbosity'], chatgptParameters: ['reasoningEffort'], key: 'required', defaultBaseUrl: 'https://api.openai.com/v1' },
-    { id: 'anthropic', parameters: ['temperature', 'topK', 'thinkingTokens'], chatgptParameters: null, key: 'required', defaultBaseUrl: 'https://api.anthropic.com/v1' },
+    { id: 'openai-chat', parameters: ['temperature', 'topP', 'minP', 'reasoningEffort'], chatgptParameters: null, key: 'optional', defaultBaseUrl: null, reformat: {}, instructTemplate: false },
+    { id: 'openai-responses', parameters: ['temperature', 'topP', 'reasoningEffort', 'verbosity'], chatgptParameters: ['reasoningEffort'], key: 'required', defaultBaseUrl: 'https://api.openai.com/v1', reformat: null, instructTemplate: false },
+    { id: 'anthropic', parameters: ['temperature', 'topK', 'thinkingTokens'], chatgptParameters: null, key: 'required', defaultBaseUrl: 'https://api.anthropic.com/v1', reformat: null, instructTemplate: false },
+    { id: 'kobold', parameters: ['temperature', 'topP', 'repetitionPenalty'], chatgptParameters: null, key: 'optional', defaultBaseUrl: 'http://localhost:5001', reformat: { systemPrompt: 'first' }, instructTemplate: true },
   ],
   providers: [
-    { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', formats: ['openai-responses', 'openai-chat'], key: 'required' },
-    { id: 'anthropic', label: 'Anthropic', baseUrl: 'https://api.anthropic.com/v1', formats: ['anthropic'], key: 'required' },
+    { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', formats: ['openai-responses', 'openai-chat'], key: 'required', kind: 'api_key' },
+    { id: 'anthropic', label: 'Anthropic', baseUrl: 'https://api.anthropic.com/v1', formats: ['anthropic'], key: 'required', kind: 'api_key' },
   ],
-  localEndpoints: [{ id: 'ollama', label: 'Ollama', endpoint: 'http://localhost:11434/v1' }],
+  localEndpoints: [
+    { id: 'ollama', label: 'Ollama', endpoint: 'http://localhost:11434/v1', formats: ['openai-chat'] },
+    { id: 'koboldcpp', label: 'KoboldCpp', endpoint: 'http://localhost:5001', formats: ['kobold'] },
+  ],
   reasoningEfforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
   verbosities: ['low', 'medium', 'high'],
+  instructTemplates: ['llama3', 'chatml', 'alpaca', 'jinja'],
 };
 const credential = (id: string, kind: string, provider: string, label: string): Credential => ({
   id, kind, provider, label, baseUrl: null, hint: 'sk-…1234', connected: true, createdAt: '', updatedAt: '',
@@ -142,6 +147,33 @@ describe('the model preset editor', () => {
     expect(asked).toEqual(['/api/model-presets/catalog?format=openai-responses&credentialId=plan']);
     const effort = control('추론 강도') as HTMLSelectElement;
     expect([...effort.options].map((option) => option.textContent)).toEqual(['기본 (낮음)', '낮음', '높음']);
+  });
+
+  it("offers a text format's instruct template, its own servers' addresses and RisuAI's flags, and saves the template it picks", async () => {
+    await render();
+    expect(captions()).not.toContain('인스트럭트 템플릿');
+    await change(control('요청 형식'), 'kobold');
+    const endpoints = [...host.querySelectorAll('datalist option')].map((option) => (option as HTMLOptionElement).value);
+    expect(endpoints).toEqual(['http://localhost:5001']);
+    expect(host.textContent).toContain('비워 두면 http://localhost:5001로 보냅니다.');
+    const template = control('인스트럭트 템플릿') as HTMLSelectElement;
+    expect([...template.options].map((option) => option.value)).toEqual(['', 'llama3', 'chatml', 'alpaca', 'jinja']);
+    await change(template, 'jinja');
+    await act(async () => button('고급').dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    // RisuAI's flag for Kobold: one system prompt, first.
+    expect((control('시스템 메시지') as HTMLSelectElement).value).toBe('first');
+    await change(control('프리셋 이름'), 'Kobold');
+    await change(control('모델'), 'koboldcpp');
+    const jinja = [...host.querySelectorAll('textarea')][0]!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(jinja, '{{ messages[0].content }}');
+      jinja.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => button('저장').dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(sent[0]).toMatchObject({
+      path: '/api/model-presets',
+      body: { format: 'kobold', endpoint: null, params: { instructTemplate: 'jinja', jinjaTemplate: '{{ messages[0].content }}' }, capabilities: {} },
+    });
   });
 
   it('refuses extra headers that are not a JSON object before anything is sent', async () => {

@@ -3,6 +3,7 @@ import {
   availableFormats,
   credentialFits,
   formatOf,
+  INSTRUCT_TEMPLATE_NAMES,
   LLMError,
   listModels,
   LOCAL_ENDPOINTS,
@@ -10,20 +11,21 @@ import {
   parseCapabilities,
   parseModelParams,
   PROVIDERS,
+  readServiceAccount,
   REASONING_EFFORTS,
   validateCredential,
   VERBOSITIES,
   type ModelCredential,
   type ModelFormat,
+  type ProviderSpec,
 } from '@shizue/llm';
-import { and, asc, count, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import {
   credentialJson,
   keyProvider,
   loadCredential,
   maskKey,
-  MAX_CREDENTIALS,
   MAX_LABEL_LENGTH,
   MAX_SECRET_LENGTH,
   openCredential,
@@ -37,8 +39,7 @@ import { bindingJson, ensureFirstPreset, mergeBinding, modelOf, presetJson, read
 import { requireLocal } from '../session.js';
 import { isUuid, readJsonBody, requireUuidParam } from '../util.js';
 
-/** Model presets an owner may keep, and the longest name and model id. */
-export const MAX_MODEL_PRESETS = 100;
+/** The longest preset name and model id. */
 const MAX_NAME_LENGTH = 100;
 const MAX_MODEL_LENGTH = 200;
 /** What a preset's test asks for, and how long it may take. */
@@ -63,20 +64,87 @@ const labelOf = (value: unknown, fallback: string): string => {
   return value.trim().slice(0, MAX_LABEL_LENGTH) || fallback;
 };
 
-/** An API key as entered: trimmed, at most `MAX_SECRET_LENGTH`, with no line breaks. */
-const keyOf = (value: unknown): string => {
-  if (typeof value !== 'string') throw badRequest('invalid_request', 'apiKey must be a string');
-  const key = value.trim();
-  if (key.length > MAX_SECRET_LENGTH || /[\r\n\0]/.test(key)) throw badRequest('invalid_request', 'apiKey must be one line');
-  return key;
+/** A secret as entered: trimmed, at most `MAX_SECRET_LENGTH`, with no line breaks. */
+const secretOf = (value: unknown, field = 'apiKey'): string => {
+  if (typeof value !== 'string') throw badRequest('invalid_request', `${field} must be a string`);
+  const secret = value.trim();
+  if (secret.length > MAX_SECRET_LENGTH || /[\r\n\0]/.test(secret)) throw badRequest('invalid_request', `${field} must be one line`);
+  return secret;
 };
 
+/** AWS's region names (`us-east-1`, `ap-northeast-2`, `us-gov-west-1`). */
+const AWS_REGION = /^[a-z]{2}(?:-[a-z]+)+-\d{1,2}$/;
+/** Google Cloud's (`us-central1`, `europe-west4`), or `global`. */
+const GCP_REGION = /^(?:global|[a-z]+(?:-[a-z]+)+\d{1,2})$/;
+const regionOf = (value: unknown, pattern: RegExp): string => {
+  if (typeof value !== 'string' || !pattern.test(value.trim())) throw badRequest('invalid_request', 'region must be a region name');
+  return value.trim();
+};
+
+type SecretFields = Pick<typeof credentials.$inferInsert, 'baseUrl' | 'secrets' | 'meta' | 'hint'>;
+
+/** AWS keys as a credential holds them: each sealed, the region beside them, the access key's hint. */
+function awsFields(vault: ReturnType<typeof vaultOf>, body: Record<string, unknown>): SecretFields {
+  const accessKeyId = secretOf(body['accessKeyId'], 'accessKeyId');
+  if (!/^[A-Z0-9]{16,128}$/.test(accessKeyId)) throw badRequest('invalid_request', 'accessKeyId must be an AWS access key id');
+  const secretAccessKey = secretOf(body['secretAccessKey'], 'secretAccessKey');
+  if (!secretAccessKey) throw badRequest('invalid_request', 'secretAccessKey is required');
+  const sessionToken = body['sessionToken'] === undefined || body['sessionToken'] === null ? '' : secretOf(body['sessionToken'], 'sessionToken');
+  const region = regionOf(body['region'], AWS_REGION);
+  return {
+    baseUrl: null,
+    secrets: {
+      accessKeyId: vault.seal(accessKeyId),
+      secretAccessKey: vault.seal(secretAccessKey),
+      ...(sessionToken ? { sessionToken: vault.seal(sessionToken) } : {}),
+    },
+    meta: { region },
+    hint: `${maskKey(accessKeyId)} · ${region}`,
+  };
+}
+
+/** A Google service account's key file as a credential holds it: the private key sealed, its address, project and region beside it. */
+async function serviceAccountFields(vault: ReturnType<typeof vaultOf>, body: Record<string, unknown>): Promise<SecretFields> {
+  const file = body['serviceAccount'];
+  if (typeof file !== 'string' || file.length > MAX_SECRET_LENGTH) throw badRequest('invalid_request', 'serviceAccount must be the JSON key file of a service account');
+  let account: Awaited<ReturnType<typeof readServiceAccount>>;
+  try {
+    account = await readServiceAccount(file);
+  } catch (error) {
+    throw badRequest('invalid_request', error instanceof TypeError ? error.message : 'serviceAccount cannot be read');
+  }
+  const region = regionOf(body['region'] ?? 'global', GCP_REGION);
+  return {
+    baseUrl: null,
+    secrets: { privateKey: vault.seal(account.privateKey) },
+    meta: { clientEmail: account.clientEmail, projectId: account.projectId, region },
+    hint: `${account.clientEmail} · ${region}`,
+  };
+}
+
+/** An API key and the address it goes to, as a credential holds them. */
+function keyFields(vault: ReturnType<typeof vaultOf>, provider: ProviderSpec, body: Record<string, unknown>): SecretFields {
+  const apiKey = body['apiKey'] === undefined ? '' : secretOf(body['apiKey']);
+  if (!apiKey && provider.key === 'required') throw badRequest('invalid_request', `A ${provider.label} key is required`);
+  const baseUrl = body['baseUrl'] === undefined || body['baseUrl'] === null ? null : requireHttpUrl(body['baseUrl'], 'baseUrl');
+  if (!baseUrl && !provider.baseUrl) throw badRequest('invalid_request', 'baseUrl is required for this provider');
+  return { baseUrl, secrets: apiKey ? { apiKey: vault.seal(apiKey) } : {}, meta: {}, hint: apiKey ? maskKey(apiKey) : '' };
+}
+
+/** What a create's body makes of a credential of `provider`'s kind. */
+async function fieldsFor(vault: ReturnType<typeof vaultOf>, provider: ProviderSpec, body: Record<string, unknown>): Promise<SecretFields> {
+  if (provider.kind === 'aws') return awsFields(vault, body);
+  if (provider.kind === 'gcp_service_account') return serviceAccountFields(vault, body);
+  return keyFields(vault, provider, body);
+}
+
 /**
- * `/api/credentials` — the owner's API keys and the ChatGPT connection, as the
- * settings list them. A secret goes in and never comes out: the list carries a
- * masked hint. Adding, changing, removing and checking a key is this
- * computer's alone (`requireLocal`), as connecting ChatGPT is; a paired phone
- * reads the list.
+ * `/api/credentials` — the owner's API keys, AWS keys and Google service
+ * accounts (the kind each provider's credential is, `ProviderSpec.kind`) and
+ * the ChatGPT connection, as the settings list them. A secret goes in and never
+ * comes out: the list carries a masked hint. Adding, changing, removing and
+ * checking a key is this computer's alone (`requireLocal`), as connecting
+ * ChatGPT is; a paired phone reads the list.
  */
 export function credentialRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
@@ -92,21 +160,13 @@ export function credentialRoutes(deps: AppDeps): Hono<AppEnv> {
     const body = await readJsonBody(c);
     const provider = keyProvider(body['provider']);
     if (!provider) throw badRequest('invalid_request', 'provider must be one of the providers a key is entered for');
-    const apiKey = body['apiKey'] === undefined ? '' : keyOf(body['apiKey']);
-    if (!apiKey && provider.key === 'required') throw badRequest('invalid_request', `A ${provider.label} key is required`);
-    const baseUrl = body['baseUrl'] === undefined || body['baseUrl'] === null ? null : requireHttpUrl(body['baseUrl'], 'baseUrl');
-    if (!baseUrl && !provider.baseUrl) throw badRequest('invalid_request', 'baseUrl is required for this provider');
-    const vault = vaultOf(deps);
-    const [held] = await deps.db.select({ n: count() }).from(credentials).where(eq(credentials.userId, userId));
-    if ((held?.n ?? 0) >= MAX_CREDENTIALS) throw badRequest('credential_limit', `At most ${MAX_CREDENTIALS} credentials`);
+    const fields = await fieldsFor(vaultOf(deps), provider, body);
     const [row] = await deps.db.insert(credentials).values({
       userId,
-      kind: 'api_key',
+      kind: provider.kind ?? 'api_key',
       provider: provider.id,
       label: labelOf(body['label'], provider.label),
-      baseUrl,
-      secrets: apiKey ? { apiKey: vault.seal(apiKey) } : {},
-      hint: apiKey ? maskKey(apiKey) : '',
+      ...fields,
     }).returning();
     // An owner with no model preset yet gets one on this key (`ensureFirstPreset`).
     await ensureFirstPreset(deps, row!);
@@ -124,12 +184,25 @@ export function credentialRoutes(deps: AppDeps): Hono<AppEnv> {
     const body = await readJsonBody(c);
     const changes: Partial<typeof credentials.$inferInsert> = { updatedAt: new Date() };
     if (body['label'] !== undefined) changes.label = labelOf(body['label'], row.label);
+    const keyed = ['apiKey', 'baseUrl', 'accessKeyId', 'secretAccessKey', 'sessionToken', 'serviceAccount', 'region'].filter((field) => body[field] !== undefined);
     if (row.kind === 'chatgpt') {
-      if (body['apiKey'] !== undefined || body['baseUrl'] !== undefined) throw badRequest('invalid_request', 'The ChatGPT connection takes a label only');
+      if (keyed.length > 0) throw badRequest('invalid_request', 'The ChatGPT connection takes a label only');
+    } else if (row.kind === 'aws' || row.kind === 'gcp_service_account') {
+      if (keyed.includes('apiKey') || keyed.includes('baseUrl')) throw badRequest('invalid_request', 'This credential has no key or address of that kind');
+      const replaced = row.kind === 'aws' ? ['accessKeyId', 'secretAccessKey', 'sessionToken'] : ['serviceAccount'];
+      if (keyed.some((field) => replaced.includes(field))) {
+        // New secrets replace the old whole, in the region given or the one it had.
+        const next = { ...body, region: body['region'] ?? row.meta.region };
+        Object.assign(changes, row.kind === 'aws' ? awsFields(vaultOf(deps), next) : await serviceAccountFields(vaultOf(deps), next));
+      } else if (body['region'] !== undefined) {
+        const region = regionOf(body['region'], row.kind === 'aws' ? AWS_REGION : GCP_REGION);
+        changes.meta = { ...row.meta, region };
+        changes.hint = `${row.hint.replace(/ · [^·]*$/, '')} · ${region}`;
+      }
     } else {
       const provider = keyProvider(row.provider);
       if (body['apiKey'] !== undefined) {
-        const apiKey = keyOf(body['apiKey']);
+        const apiKey = secretOf(body['apiKey']);
         if (!apiKey && provider?.key === 'required') throw badRequest('invalid_request', 'A key is required');
         changes.secrets = apiKey ? { apiKey: vaultOf(deps).seal(apiKey) } : {};
         changes.hint = apiKey ? maskKey(apiKey) : '';
@@ -241,11 +314,15 @@ export function modelPresetRoutes(deps: AppDeps): Hono<AppEnv> {
         chatgptParameters: format.chatgpt ?? null,
         key: format.key,
         defaultBaseUrl: format.defaultBaseUrl ?? null,
+        // RisuAI's flags for the format's models, which the preset's own lay over; null: the format places system turns itself.
+        reformat: format.reformat ?? null,
+        instructTemplate: format.instructTemplate === true,
       })),
-      providers: PROVIDERS.map(({ id, label, baseUrl, formats, key }) => ({ id, label, baseUrl: baseUrl ?? null, formats, key })),
+      providers: PROVIDERS.map(({ id, label, baseUrl, formats, key, kind }) => ({ id, label, baseUrl: baseUrl ?? null, formats, key, kind: kind ?? 'api_key' })),
       localEndpoints: LOCAL_ENDPOINTS,
       reasoningEfforts: REASONING_EFFORTS,
       verbosities: VERBOSITIES,
+      instructTemplates: INSTRUCT_TEMPLATE_NAMES,
     }),
   );
 
@@ -265,8 +342,6 @@ export function modelPresetRoutes(deps: AppDeps): Hono<AppEnv> {
   app.post('/', async (c) => {
     const userId = c.get('userId');
     const fields = await presetFields(deps, userId, await readJsonBody(c));
-    const [held] = await deps.db.select({ n: count() }).from(modelPresets).where(eq(modelPresets.userId, userId));
-    if ((held?.n ?? 0) >= MAX_MODEL_PRESETS) throw badRequest('model_preset_limit', `At most ${MAX_MODEL_PRESETS} model presets`);
     const [row] = await deps.db.insert(modelPresets).values({ userId, ...fields }).returning();
     return c.json(presetJson(row!), 201);
   });

@@ -278,6 +278,9 @@ importers:
 
   apps/plot/packages/llm:
     dependencies:
+      '@huggingface/jinja':
+        specifier: ^0.5.10
+        version: 0.5.10
       jose:
         specifier: ^6.2.12
         version: 6.2.12

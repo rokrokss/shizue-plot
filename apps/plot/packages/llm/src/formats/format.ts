@@ -11,7 +11,11 @@ export type ModelAccess =
   /** An API key; the format decides the header it goes in. */
   | { kind: 'key'; apiKey: string }
   /** The owner's ChatGPT connection: its access token, refreshed on a refusal, and its catalog. */
-  | { kind: 'chatgpt'; accessToken: (rejected?: string) => Promise<string>; models: () => Promise<ChatGPTModel[]> };
+  | { kind: 'chatgpt'; accessToken: (rejected?: string) => Promise<string>; models: () => Promise<ChatGPTModel[]> }
+  /** AWS keys, which sign each request (SigV4) rather than ride in it. */
+  | { kind: 'aws'; accessKeyId: string; secretAccessKey: string; sessionToken?: string; region: string }
+  /** A Google Cloud service account, which mints the bearer token the requests carry (`vertex.ts`). */
+  | { kind: 'gcp'; clientEmail: string; privateKey: string; projectId: string; region: string };
 
 /** What a format's adapter is made from: a model preset with its credential opened. */
 export interface AdapterConfig {
@@ -61,8 +65,19 @@ export interface ModelFormat {
   defaultBaseUrl?: string;
   /** Only the automated tests have it: `echo`. */
   testOnly?: boolean;
+  /**
+   * RisuAI's flags for this format's models (`hasFirstSystemPrompt`,
+   * `requiresAlternateRole`, `mustStartWithUserInput`), which a preset's own
+   * capabilities are laid over before its turns are arranged (`reformat`).
+   * Absent: the format places system turns itself and the flags do not apply.
+   */
+  reformat?: ModelCapabilities;
+  /** Whether a preset on it picks an instruct template (`ModelParams.instructTemplate`): the formats that write the chat through one. */
+  instructTemplate?: boolean;
   createAdapter(config: AdapterConfig): LLMAdapter;
   listModels(config: CatalogConfig): Promise<ModelListing[]>;
+  /** A call that needs the key, for a format whose listing does not (`validateCredential`). */
+  checkKey?(config: CatalogConfig): Promise<void>;
 }
 
 /** How long a listing or a key check may take. */

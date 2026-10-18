@@ -146,12 +146,32 @@ with no sub model the main one does the side work. On a limit or connection
 error the app reports it and does not switch to another preset (ARCHITECTURE
 §7.1).
 
+Every request format RisuAI has is here but WebLLM and Plugin, which run inside
+RisuAI's own page, and its Echo:
+
 | Request format | For |
 |---|---|
-| OpenAI-compatible (Chat Completions) | OpenAI, OpenRouter, DeepSeek, DeepInfra and Mistral keys, any compatible server, and keyless local servers such as LM Studio, Ollama, llama.cpp or vLLM |
-| OpenAI Responses | OpenAI keys, and your ChatGPT plan |
-| Anthropic Messages | Anthropic keys |
+| OpenAI-compatible (Chat Completions) | OpenAI, OpenRouter, DeepSeek, DeepInfra, Mistral and NanoGPT keys, any compatible server, and keyless local servers such as LM Studio, Ollama's `/v1`, llama.cpp or vLLM |
+| OpenAI Responses | OpenAI and NanoGPT keys, and your ChatGPT plan |
+| Anthropic Messages | Anthropic and NanoGPT keys |
 | Google Gemini | Google AI Studio keys |
+| Google Vertex AI (Gemini) | A Google Cloud service account's JSON key, and its region |
+| AWS Bedrock (Claude) | AWS access keys (a session token too, for temporary ones), and their region |
+| Mistral | Mistral keys, with RisuAI's turn rules for Mistral |
+| Cohere | Cohere keys (the v1 chat API) |
+| Ollama (native API) | Ollama on this computer, keyless, or Ollama Cloud's key |
+| text-generation-webui, and its legacy API | A local text-generation-webui, or Mancer's key on the legacy one |
+| KoboldAI / KoboldCpp | A local Kobold server (KoboldCpp's stream where it has one) |
+| NovelAI | A NovelAI persistent API token |
+| NovelList (AI Novelist) | NovelList keys |
+| AI Horde | Anyone (the anonymous key), or your Horde key |
+| OpenAI legacy completions | OpenAI and NanoGPT keys, for completion models such as `gpt-3.5-turbo-instruct` |
+| Anthropic legacy text completions | Anthropic keys, for the retired Text Completions API (RisuAI's prompt until 2024) |
+
+The text formats (text-generation-webui, Kobold, Horde) write the chat as one
+prompt through an instruct template the preset picks, RisuAI's built-ins
+(ChatML by default, Llama 3, Llama 2, Gemma, Mistral, Vicuna, Alpaca) or your
+own Jinja; NovelAI and NovelList get RisuAI's own transcripts of the chat.
 
 ### API keys
 
@@ -160,10 +180,13 @@ phone only lists them. The API seals each key in the app's folder (the install's
 `secret` derives the key), never returns it — the page shows a masked hint — and
 sends it only to the address it was entered for: the provider's own, or the one
 you typed for a custom server. **Check** asks the provider whether the key
-works. Saving a key while you have no model preset makes one on the
-provider's first listed model and makes it the default. A preset picks the
-key, and **Load the model list** fetches the provider's models for it. A server that needs no key gets its address in the
-preset instead, and no key is ever sent there.
+works. Saving a key while you have no model preset makes one on a chat model
+the provider lists (a mini or Sonnet-class one where it has one, never an
+embedding or completions-only model) and makes it the default. A preset picks
+the key, and **Load the model list** fetches the provider's models for it. A
+server that needs no key gets its address in the preset instead, and no key is
+ever sent there. AWS keys go only to their region's Bedrock, and a service
+account only to its project's Vertex AI and Google's token endpoint.
 
 ### Your ChatGPT plan
 

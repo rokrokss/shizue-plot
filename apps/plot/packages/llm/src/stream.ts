@@ -105,6 +105,45 @@ export async function* readSse(
   }
 }
 
+/**
+ * The objects of a newline-delimited JSON body (Ollama's `/api/chat`, Cohere's
+ * chat stream), in order, read as `readSse` reads events: split UTF-8, CRLF and
+ * a last line with no line break after it. A line that is not JSON is
+ * `invalid`.
+ */
+export async function* readJsonLines(
+  body: ReadableStream<Uint8Array>,
+  watch: IdleWatch,
+  errors: { invalid: () => LLMError },
+): AsyncGenerator<unknown, void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let pending = '';
+  try {
+    while (true) {
+      watch.arm();
+      const { done, value } = await reader.read();
+      watch.disarm();
+      pending += decoder.decode(value, { stream: !done });
+      let boundary: number;
+      while ((boundary = pending.indexOf('\n')) >= 0) {
+        const line = pending.slice(0, boundary).trim();
+        pending = pending.slice(boundary + 1);
+        if (line) yield eventJson<unknown>(line, errors.invalid);
+      }
+      if (pending.length > MAX_PENDING_BYTES) throw errors.invalid();
+      if (done) {
+        if (pending.trim()) yield eventJson<unknown>(pending.trim(), errors.invalid);
+        return;
+      }
+    }
+  } finally {
+    watch.disarm();
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 /** Parses an event's JSON, or throws `invalid`: an event that is not JSON is not this provider's stream. */
 export function eventJson<T>(data: string, invalid: () => LLMError): T {
   try {
@@ -157,6 +196,38 @@ export class StopFilter {
   /** The held tail, at the end of the stream. */
   flush(): string {
     if (this.stopped) return '';
+    const out = this.held;
+    this.held = '';
+    return out;
+  }
+}
+
+/**
+ * A string taken out of a text as it arrives — RisuAI's `.replace(/##\n/g, '')`
+ * on a completion — in one pass from the left, as the replace makes it; the
+ * tail that may be the start of one is held back until it cannot be.
+ */
+export class Strip {
+  private held = '';
+
+  constructor(private readonly needle: string) {}
+
+  push(text: string): string {
+    this.held += text;
+    let out = '';
+    let at: number;
+    while ((at = this.held.indexOf(this.needle)) >= 0) {
+      out += this.held.slice(0, at);
+      this.held = this.held.slice(at + this.needle.length);
+    }
+    let keep = Math.min(this.held.length, this.needle.length - 1);
+    while (keep > 0 && !this.needle.startsWith(this.held.slice(-keep))) keep -= 1;
+    out += this.held.slice(0, this.held.length - keep);
+    this.held = this.held.slice(this.held.length - keep);
+    return out;
+  }
+
+  flush(): string {
     const out = this.held;
     this.held = '';
     return out;

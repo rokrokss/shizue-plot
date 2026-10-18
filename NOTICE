@@ -17,7 +17,8 @@ software under the GNU General Public License, version 3:
     The character card formats it reads (V1 to V3, charx, RisuRealm), the CBS
     macro language, lorebook activation, regex scripts, triggers and the Lua
     runtime with its API, HypaV3 memory, prompt presets and their parameters,
-    and the request formats a model is called in (LLMFormat).
+    and the request formats a model is called in (LLMFormat), with the
+    instruct templates and transcripts its text formats write the chat in.
 
   PocketRisu, by its contributors
   https://github.com/PocketRisu/PocketRisu

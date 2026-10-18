@@ -18,6 +18,8 @@ const MESSAGES: Record<string, string> = {
   endpoint_required: 'This model preset needs an address.',
   credential_format_mismatch: "This key does not speak the model preset's format.",
   format_unavailable: 'This model format is not available.',
+  template_invalid: "This model preset's instruct template is not one this app has.",
+  template_failed: "The model preset's instruct template could not be applied to this chat.",
 };
 
 export const providerFailure = (code: string, status: number, detail?: string): LLMError =>

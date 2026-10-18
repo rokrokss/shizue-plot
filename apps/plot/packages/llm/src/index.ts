@@ -1,5 +1,6 @@
 export * from './types.js';
 export * from './params.js';
+export * from './instructTemplates.js';
 export * from './stream.js';
 export * from './http.js';
 export * from './echo.js';

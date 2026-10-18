@@ -1,3 +1,4 @@
+import { INSTRUCT_TEMPLATE_NAMES, parsesAsTemplate } from './instructTemplates.js';
 import type { ChatMessage, ChatRequest, SamplingValues } from './types.js';
 
 /** The sampling values a model preset may set, in the order the editor shows them. */
@@ -35,6 +36,14 @@ export interface ModelParams extends SamplingValues {
   extraHeaders?: Record<string, string>;
   /** Body fields set over what the adapter built, as RisuAI's additional parameters are. */
   extraBody?: Record<string, unknown>;
+  /**
+   * The instruct template a text format writes the chat with (RisuAI's
+   * `instructChatTemplate`): a built-in's name (`INSTRUCT_TEMPLATES`, `chatml`
+   * where it names none), or `jinja` for `jinjaTemplate`.
+   */
+  instructTemplate?: string;
+  /** The preset's own Jinja chat template, for `instructTemplate: 'jinja'` (RisuAI's `JinjaTemplate`). */
+  jinjaTemplate?: string;
 }
 
 /**
@@ -184,6 +193,7 @@ const MAX_STOPS = 16;
 const MAX_STOP_LENGTH = 200;
 const MAX_EXTRA_HEADERS = 32;
 const MAX_EXTRA_BODY_BYTES = 16 * 1024;
+const MAX_TEMPLATE_LENGTH = 16 * 1024;
 /** A header name as RFC 9110's token, so a stored one is always sendable. */
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}$/;
 /** Headers a preset may not set: the transport's own. */
@@ -236,6 +246,14 @@ export function parseModelParams(value: unknown): ModelParams {
         throw new TypeError(`extraBody holds at most ${MAX_EXTRA_BODY_BYTES} bytes`);
       }
       if (Object.keys(raw).length > 0) out.extraBody = raw as Record<string, unknown>;
+    } else if (key === 'instructTemplate') {
+      if (!INSTRUCT_TEMPLATE_NAMES.includes(raw as never)) throw new TypeError(`instructTemplate must be one of ${INSTRUCT_TEMPLATE_NAMES.join(', ')}`);
+      out.instructTemplate = raw as string;
+    } else if (key === 'jinjaTemplate') {
+      if (typeof raw !== 'string' || raw.length > MAX_TEMPLATE_LENGTH) throw new TypeError(`jinjaTemplate must be at most ${MAX_TEMPLATE_LENGTH} characters`);
+      if (!raw.trim()) continue;
+      if (!parsesAsTemplate(raw)) throw new TypeError('jinjaTemplate is not a Jinja template this app reads');
+      out.jinjaTemplate = raw;
     } else {
       throw new TypeError(`Unknown parameter: ${key}`);
     }

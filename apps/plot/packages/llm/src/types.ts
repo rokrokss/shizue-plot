@@ -90,6 +90,20 @@ export interface ChatRequest extends SamplingValues {
    */
   cacheKey?: string;
   stop?: string[];
+  /**
+   * Who speaks, for the formats that write the chat as one text
+   * (`stringlize.ts`): RisuAI's character name and `getUserName()`. A chat's
+   * reply names them; a side call leaves them out, and those formats say
+   * `Assistant` and `User`.
+   */
+  names?: { char: string; user: string };
+  /**
+   * The chat's context size in tokens (RisuAI's `maxContext`), which the local
+   * servers are told: Kobold's and Horde's `max_context_length`, Ollama's
+   * `num_ctx`. Absent, Kobold and Ollama keep their own, and Horde asks for
+   * RisuAI's default.
+   */
+  contextTokens?: number;
   abortSignal?: AbortSignal;
 }
 

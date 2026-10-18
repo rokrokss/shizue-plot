@@ -30,8 +30,11 @@ const FROM_TUNNEL = {
 
 export interface SentRequest {
   url: string;
+  method: string;
   headers: Record<string, string>;
   body: Record<string, unknown> | undefined;
+  /** The body as sent, for one that is not JSON (a token request's form). */
+  text: string | undefined;
 }
 
 export function modelsHarness() {
@@ -58,10 +61,19 @@ export function modelsHarness() {
       throw new Error('no provider call expected');
     };
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const text = typeof init?.body === 'string' ? init.body : undefined;
+      let body: Record<string, unknown> | undefined;
+      try {
+        body = text === undefined ? undefined : (JSON.parse(text) as Record<string, unknown>);
+      } catch {
+        body = undefined;
+      }
       const request: SentRequest = {
         url: String(input),
+        method: init?.method ?? 'GET',
         headers: Object.fromEntries(new Headers(init?.headers).entries()),
-        body: typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : undefined,
+        body,
+        text,
       };
       sent.push(request);
       return respond(request);

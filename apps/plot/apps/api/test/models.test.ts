@@ -38,16 +38,29 @@ const send = async (app: Hono<AppEnv>, chatId: string, content = '안녕') =>
 
 describe('model presets', () => {
   it('describe each format by the values it sends, and the providers a key is entered for', async () => {
-    const { formats, providers, localEndpoints } = await readJson(await h.call(h.app(), 'GET', '/api/model-presets/formats'));
+    const { formats, providers, localEndpoints, instructTemplates } = await readJson(await h.call(h.app(), 'GET', '/api/model-presets/formats'));
     const byId = Object.fromEntries(formats.map((format: any) => [format.id, format]));
-    expect(Object.keys(byId)).toEqual(['openai-chat', 'openai-responses', 'anthropic', 'google', 'echo']);
-    expect(byId['openai-chat']).toMatchObject({ key: 'optional', chatgptParameters: null });
+    expect(Object.keys(byId)).toEqual([
+      'openai-chat', 'openai-responses', 'anthropic', 'google', 'vertex', 'bedrock', 'mistral', 'cohere',
+      'ollama', 'ooba', 'ooba-legacy', 'kobold', 'novelai', 'novellist', 'horde', 'openai-legacy', 'anthropic-legacy', 'echo',
+    ]);
+    expect(byId['openai-chat']).toMatchObject({ key: 'optional', chatgptParameters: null, reformat: {}, instructTemplate: false });
     expect(byId['openai-chat'].parameters).toEqual(expect.arrayContaining(['temperature', 'minP', 'topA', 'repetitionPenalty', 'reasoningEffort']));
     expect(byId['openai-chat'].parameters).not.toContain('thinkingTokens');
     expect(byId['anthropic'].parameters).toEqual(['temperature', 'topP', 'topK', 'reasoningEffort', 'thinkingTokens']);
+    expect(byId['anthropic'].reformat).toBeNull();
     expect(byId['openai-responses']).toMatchObject({ key: 'required', chatgptParameters: ['reasoningEffort'] });
-    expect(providers.map((provider: any) => provider.id)).toEqual(['openai', 'anthropic', 'google', 'openrouter', 'deepseek', 'deepinfra', 'mistral', 'custom']);
-    expect(localEndpoints).toContainEqual({ id: 'ollama', label: 'Ollama', endpoint: 'http://localhost:11434/v1' });
+    // RisuAI's flags for its Mistral models, which a preset's own lay over; a template for the text formats.
+    expect(byId['mistral']).toMatchObject({ reformat: { systemPrompt: 'first', alternateRoles: true, startWithUser: true }, instructTemplate: false });
+    expect(byId['kobold']).toMatchObject({ key: 'optional', defaultBaseUrl: 'http://localhost:5001', reformat: { systemPrompt: 'first' }, instructTemplate: true });
+    expect(instructTemplates).toEqual(['llama3', 'llama2', 'chatml', 'gpt2', 'gemma', 'mistral', 'vicuna', 'alpaca', 'jinja']);
+    expect(providers.map((provider: any) => provider.id)).toEqual([
+      'openai', 'anthropic', 'google', 'vertex', 'aws', 'openrouter', 'deepseek', 'deepinfra', 'mistral', 'cohere', 'nanogpt', 'novelai', 'novellist', 'horde', 'ollama', 'custom',
+    ]);
+    expect(providers.find((provider: any) => provider.id === 'aws')).toMatchObject({ kind: 'aws', baseUrl: null, formats: ['bedrock'] });
+    expect(providers.find((provider: any) => provider.id === 'openai')).toMatchObject({ kind: 'api_key', formats: ['openai-responses', 'openai-chat', 'openai-legacy'] });
+    expect(localEndpoints).toContainEqual({ id: 'ollama', label: 'Ollama', endpoint: 'http://localhost:11434/v1', formats: ['openai-chat'] });
+    expect(localEndpoints).toContainEqual({ id: 'koboldcpp', label: 'KoboldCpp', endpoint: 'http://localhost:5001', formats: ['kobold'] });
   });
 
   it('makes, changes and removes a preset, held to its format, its credential and its values', async () => {

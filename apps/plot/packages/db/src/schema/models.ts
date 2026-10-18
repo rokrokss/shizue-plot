@@ -11,23 +11,30 @@ import { user } from './auth.js';
 export type CredentialKind = 'api_key' | 'chatgpt' | 'aws' | 'gcp_service_account' | 'token';
 
 /**
- * The ChatGPT connection's facts that are not secret: the account's `sub`, the
- * registration OpenAI issued for it (reused on the next connection, and kept
- * through a disconnect), and the scope its tokens carry.
+ * A credential's facts that are not secret. The ChatGPT connection's: the
+ * account's `sub`, the registration OpenAI issued for it (reused on the next
+ * connection, and kept through a disconnect), and the scope its tokens carry.
+ * AWS keys' region; a Google service account's address, project and region.
  */
 export interface CredentialMeta {
   subject?: string;
   clientId?: string;
   scope?: string;
+  region?: string;
+  projectId?: string;
+  clientEmail?: string;
 }
 
-// A secret the owner gave for model calls: an API key, or the ChatGPT
-// connection's tokens. `secrets` holds each secret field sealed on its own with
-// the install's token cipher (`tokenCipher` in the API, `v1.iv.body.tag`) —
-// `{apiKey}` for a key, `{accessToken, refreshToken, idToken}` for ChatGPT — and
+// A secret the owner gave for model calls: an API key, AWS keys, a Google
+// service account's key, or the ChatGPT connection's tokens. `secrets` holds
+// each secret field sealed on its own with the install's token cipher
+// (`tokenCipher` in the API, `v1.iv.body.tag`) — `{apiKey}` for a key,
+// `{accessKeyId, secretAccessKey, sessionToken?}` for AWS, `{privateKey}` for a
+// service account, `{accessToken, refreshToken, idToken}` for ChatGPT — and
 // never leaves the server; `hint` is what the page shows of it. A key goes only
-// to `base_url`, or its provider's own address when that is null. One ChatGPT
-// connection per owner. Written from this computer only (`requireLocal`).
+// to `base_url`, or its provider's own address when that is null; AWS keys to
+// their region's Bedrock, a service account to its project's Vertex. One
+// ChatGPT connection per owner. Written from this computer only (`requireLocal`).
 export const credentials = pgTable(
   'credentials',
   {

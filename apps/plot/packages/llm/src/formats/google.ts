@@ -1,12 +1,13 @@
 import { errorMessageOf, joinUrl, providerFailure, providerFetch, providerHttpError, redact } from '../http.js';
-import { applyExtras, applyParameters, withPresetParams, type ParameterPlaces } from '../params.js';
+import { applyParameters, withPresetParams, type ParameterPlaces } from '../params.js';
 import { eventJson, IdleWatch, readSse, StopFilter } from '../stream.js';
-import type { ChatMessage, ChatRequest, LLMAdapter, StreamDone } from '../types.js';
+import type { ChatMessage, ChatRequest, LLMAdapter, StreamDelta, StreamDone } from '../types.js';
 import { dataUrlParts } from './anthropic.js';
 import { CATALOG_TIMEOUT_MS, type AdapterConfig, type CatalogConfig, type ModelFormat, type ModelListing } from './format.js';
+import { postJson, watched } from './send.js';
 
 /** RisuAI's Gemini parameters and their places in `generationConfig`. */
-const PLACES: ParameterPlaces = {
+export const GEMINI_PLACES: ParameterPlaces = {
   temperature: 'generationConfig.temperature',
   topP: 'generationConfig.topP',
   topK: 'generationConfig.topK',
@@ -108,7 +109,7 @@ export function generateContentBody(req: ChatRequest): Record<string, unknown> {
       generationConfig: { maxOutputTokens: req.maxTokens, ...(stop.length ? { stopSequences: stop } : {}) },
     },
     { ...req, ...(level ? { reasoningEffort: level } : {}), ...(req.topK === 0 ? { topK: undefined } : {}) },
-    PLACES,
+    GEMINI_PLACES,
   );
   const thinking = (body['generationConfig'] as { thinkingConfig?: Record<string, unknown> }).thinkingConfig;
   if (thinking) {
@@ -128,78 +129,70 @@ interface GeminiChunk {
 }
 
 /** A model id as the path takes it: without the `models/` its listing gives it. */
-const modelPath = (model: string): string => encodeURIComponent(model.replace(/^models\//, ''));
+export const modelPath = (model: string): string => encodeURIComponent(model.replace(/^models\//, ''));
 const invalid = () => providerFailure('provider_invalid_stream', 502);
 /** The finish reasons that mean the provider would not answer. */
 const REFUSED = new Set(['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII', 'RECITATION', 'IMAGE_SAFETY']);
 
 /**
- * Google AI Studio's Gemini: `:streamGenerateContent?alt=sse` with the key in
- * `x-goog-api-key` (not the URL, where it would sit in every log). The text
+ * A `streamGenerateContent?alt=sse` body (AI Studio's and Vertex's): the text
  * parts are the reply and the parts marked `thought` its thinking. The stream
  * has no end marker: it is done at its end once a candidate gave a finish
  * reason. A prompt the provider blocked, or a reply it stopped for safety
  * before writing anything, is `provider_refused`.
  */
-function createAdapter(config: AdapterConfig): LLMAdapter {
-  const fetcher = config.fetch ?? fetch;
-  return {
-    async *stream(request) {
-      const req = withPresetParams(request, config.params);
-      const body = generateContentBody(req);
-      const headers: Record<string, string> = { ...config.headers };
-      applyExtras(body, headers, config.params);
-      headers['Content-Type'] = 'application/json';
-      if (config.access.kind === 'key') headers['x-goog-api-key'] = config.access.apiKey;
-      const watch = new IdleWatch(req.abortSignal);
-      const stop = new StopFilter(req.stop);
-      try {
-        watch.arm();
-        const response = await providerFetch(fetcher, joinUrl(config.baseUrl, `/models/${modelPath(req.model)}:streamGenerateContent?alt=sse`), {
-          method: 'POST', signal: watch.signal, headers, body: JSON.stringify(body),
-        });
-        watch.disarm();
-        if (!response.ok) throw await providerHttpError(response);
-        if (!response.body) throw providerFailure('provider_stream_interrupted', 502);
-        let usage: StreamDone['usage'] = { promptTokens: 0, completionTokens: 0 };
-        let finish: string | undefined;
-        let wrote = false;
-        for await (const block of readSse(response.body, watch, { invalid })) {
-          const chunk = eventJson<GeminiChunk>(block.data, invalid);
-          if (chunk.error) throw providerFailure('provider_unavailable', 502, redact(errorMessageOf(chunk)));
-          if (chunk.promptFeedback?.blockReason) throw providerFailure('provider_refused', 502, chunk.promptFeedback.blockReason);
-          const candidate = chunk.candidates?.[0];
-          for (const part of candidate?.content?.parts ?? []) {
-            if (typeof part.text !== 'string' || !part.text) continue;
-            if (part.thought) {
-              if (!stop.done) yield { type: 'reasoning', reasoning: part.text };
-            } else {
-              wrote = true;
-              const out = stop.push(part.text);
-              if (out) yield { type: 'text', text: out };
-            }
-          }
-          if (candidate?.finishReason) finish = candidate.finishReason;
-          if (chunk.usageMetadata) {
-            const meta = chunk.usageMetadata;
-            usage = {
-              promptTokens: meta.promptTokenCount ?? 0,
-              completionTokens: (meta.candidatesTokenCount ?? 0) + (meta.thoughtsTokenCount ?? 0),
-              ...(typeof meta.cachedContentTokenCount === 'number' ? { cachedPromptTokens: meta.cachedContentTokenCount } : {}),
-            };
-          }
-        }
-        if (!finish) throw providerFailure('provider_stream_interrupted', 502);
-        if (!wrote && REFUSED.has(finish)) throw providerFailure('provider_refused', 502, finish);
-        const rest = stop.flush();
-        if (rest) yield { type: 'text', text: rest };
-        return { usage };
-      } catch (error) {
-        if (watch.timedOut) throw providerFailure('provider_timeout', 504);
-        throw error;
-      } finally {
-        watch.disarm();
+export async function* readGeminiStream(response: Response, watch: IdleWatch, stop: StopFilter): AsyncGenerator<StreamDelta, StreamDone> {
+  if (!response.body) throw providerFailure('provider_stream_interrupted', 502);
+  let usage: StreamDone['usage'] = { promptTokens: 0, completionTokens: 0 };
+  let finish: string | undefined;
+  let wrote = false;
+  for await (const block of readSse(response.body, watch, { invalid })) {
+    const chunk = eventJson<GeminiChunk>(block.data, invalid);
+    if (chunk.error) throw providerFailure('provider_unavailable', 502, redact(errorMessageOf(chunk)));
+    if (chunk.promptFeedback?.blockReason) throw providerFailure('provider_refused', 502, chunk.promptFeedback.blockReason);
+    const candidate = chunk.candidates?.[0];
+    for (const part of candidate?.content?.parts ?? []) {
+      if (typeof part.text !== 'string' || !part.text) continue;
+      if (part.thought) {
+        if (!stop.done) yield { type: 'reasoning', reasoning: part.text };
+      } else {
+        wrote = true;
+        const out = stop.push(part.text);
+        if (out) yield { type: 'text', text: out };
       }
+    }
+    if (candidate?.finishReason) finish = candidate.finishReason;
+    if (chunk.usageMetadata) {
+      const meta = chunk.usageMetadata;
+      usage = {
+        promptTokens: meta.promptTokenCount ?? 0,
+        completionTokens: (meta.candidatesTokenCount ?? 0) + (meta.thoughtsTokenCount ?? 0),
+        ...(typeof meta.cachedContentTokenCount === 'number' ? { cachedPromptTokens: meta.cachedContentTokenCount } : {}),
+      };
+    }
+  }
+  if (!finish) throw providerFailure('provider_stream_interrupted', 502);
+  if (!wrote && REFUSED.has(finish)) throw providerFailure('provider_refused', 502, finish);
+  const rest = stop.flush();
+  if (rest) yield { type: 'text', text: rest };
+  return { usage };
+}
+
+/**
+ * Google AI Studio's Gemini: `:streamGenerateContent?alt=sse` with the key in
+ * `x-goog-api-key` (not the URL, where it would sit in every log), read by
+ * `readGeminiStream`.
+ */
+function createAdapter(config: AdapterConfig): LLMAdapter {
+  return {
+    stream(request) {
+      const req = withPresetParams(request, config.params);
+      return watched(req, async function* (watch) {
+        const url = joinUrl(config.baseUrl, `/models/${modelPath(req.model)}:streamGenerateContent?alt=sse`);
+        const auth: Record<string, string> = config.access.kind === 'key' ? { 'x-goog-api-key': config.access.apiKey } : {};
+        const response = await postJson(config, url, generateContentBody(req), { ...config.headers }, auth, watch);
+        return yield* readGeminiStream(response, watch, new StopFilter(req.stop));
+      });
     },
   };
 }
@@ -230,7 +223,7 @@ async function listModels(config: CatalogConfig): Promise<ModelListing[]> {
 
 export const google: ModelFormat = {
   id: 'google',
-  places: PLACES,
+  places: GEMINI_PLACES,
   key: 'required',
   defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta',
   createAdapter,

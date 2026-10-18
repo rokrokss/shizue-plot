@@ -1040,6 +1040,14 @@ async function runGeneration(
           // reader's lines may be written.
           maxTokens: responseTokens(plan),
           stop: request.stopSequences ?? [],
+          // Who speaks — the speaker of a group turn, else the work — for the
+          // formats that write the chat as one text, and the context a local
+          // server is told (`ChatRequest.names`, `contextTokens`).
+          names: {
+            char: typeof plan.speaker === 'number' && plan.characters[plan.speaker] ? characterName(plan.characters[plan.speaker]!) : plan.plot.name,
+            user: plan.userName,
+          },
+          contextTokens: plan.contextBudget,
           // One cache per chat, whatever the branch: a regenerate or a swipe sends the
           // request its turn sent, which the cache serves whole, and a key of the
           // branch's own would look for it in another cache.

@@ -5,14 +5,13 @@ import type { AppDeps } from './deps.js';
 import { ApiError } from './errors.js';
 
 /**
- * The owner's credentials (`credentials`, ARCHITECTURE §5, §7.1): the API keys
- * they entered on this computer, and the ChatGPT connection. A secret is sealed
- * on its way in and opened only for the call that sends it; no route answers
- * with one.
+ * The owner's credentials (`credentials`, ARCHITECTURE §5, §7.1): the API keys,
+ * AWS keys and Google service accounts they entered on this computer, and the
+ * ChatGPT connection. A secret is sealed on its way in and opened only for the
+ * call that sends it; no route answers with one.
  */
 
-/** Credentials an owner may keep, and the longest key and label. */
-export const MAX_CREDENTIALS = 50;
+/** The longest key, label and address. */
 export const MAX_SECRET_LENGTH = 10_000;
 export const MAX_LABEL_LENGTH = 100;
 export const MAX_URL_LENGTH = 2_000;
@@ -52,28 +51,50 @@ export async function loadCredential(deps: Pick<AppDeps, 'db'>, userId: string, 
 }
 
 /**
- * A credential with its secret opened, for the one call that sends it: an API
- * key with its address, or the owner's ChatGPT account. A seal the install's
- * secret no longer opens is `credential_unreadable` — the key must be entered
- * again.
+ * A credential with its secrets opened, for the one call that sends them: an
+ * API key with its address, AWS keys with their region, a service account
+ * with its project and region, or the owner's ChatGPT account. A seal the
+ * install's secret no longer opens is `credential_unreadable` — the key must
+ * be entered again.
  */
 export function openCredential(deps: Pick<AppDeps, 'vault' | 'chatgpt'>, row: Credential): ModelCredential {
   if (row.kind === 'chatgpt') {
     if (!deps.chatgpt) throw new ApiError(503, 'chatgpt_unavailable', 'Sign in with ChatGPT is not configured');
     return { kind: 'chatgpt', account: deps.chatgpt.accounts.forUser(row.userId) };
   }
-  if (row.kind !== 'api_key') throw new ApiError(400, 'credential_kind_unsupported', `Credentials of kind ${row.kind} are not supported yet`);
-  const sealed = row.secrets['apiKey'];
-  let apiKey = '';
-  if (sealed) {
+  const opened = (field: string): string => {
+    const sealed = row.secrets[field];
+    if (!sealed) return '';
     try {
-      apiKey = vaultOf(deps).open(sealed);
+      return vaultOf(deps).open(sealed);
     } catch (error) {
       if (error instanceof ApiError) throw error;
       throw new ApiError(400, 'credential_unreadable', 'This key can no longer be read; enter it again');
     }
+  };
+  if (row.kind === 'aws') {
+    const sessionToken = opened('sessionToken');
+    return {
+      kind: 'aws',
+      provider: row.provider,
+      accessKeyId: opened('accessKeyId'),
+      secretAccessKey: opened('secretAccessKey'),
+      region: row.meta.region ?? '',
+      ...(sessionToken ? { sessionToken } : {}),
+    };
   }
-  return { kind: 'api_key', provider: row.provider, baseUrl: row.baseUrl, apiKey };
+  if (row.kind === 'gcp_service_account') {
+    return {
+      kind: 'gcp_service_account',
+      provider: row.provider,
+      clientEmail: row.meta.clientEmail ?? '',
+      privateKey: opened('privateKey'),
+      projectId: row.meta.projectId ?? '',
+      region: row.meta.region ?? '',
+    };
+  }
+  if (row.kind !== 'api_key') throw new ApiError(400, 'credential_kind_unsupported', `Credentials of kind ${row.kind} are not supported yet`);
+  return { kind: 'api_key', provider: row.provider, baseUrl: row.baseUrl, apiKey: opened('apiKey') };
 }
 
 /** An http(s) URL without credentials in it, or a 400. */

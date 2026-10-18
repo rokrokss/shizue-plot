@@ -9,7 +9,7 @@ import { useErrorMessage } from '@/lib/useErrorMessage';
 import { ChatGPTConnection } from './ChatGPTConnection';
 import { ModelOptions } from './ModelOptions';
 import { ModelPresetEditor } from './ModelPresetEditor';
-import { Button, ErrorText, Field, Select, TextInput } from './ui';
+import { Button, ErrorText, Field, Select, TextArea, TextInput } from './ui';
 
 /** `GET /api/chatgpt`'s answer, read here only for whether this browser is the computer's. */
 interface ChatGPTStatus { local: boolean }
@@ -156,7 +156,11 @@ export function ModelSettings({ chatgptError }: { chatgptError?: string }) {
   );
 }
 
-/** The API keys: listed everywhere, entered, checked and removed on the computer only. */
+/**
+ * The API keys — and AWS keys and Google service accounts, the credentials
+ * Bedrock and Vertex take: listed everywhere, entered, checked and removed on
+ * the computer only.
+ */
 function CredentialSettings({
   credentials,
   formats,
@@ -175,11 +179,23 @@ function CredentialSettings({
   const [label, setLabel] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const [accessKeyId, setAccessKeyId] = useState('');
+  const [secretAccessKey, setSecretAccessKey] = useState('');
+  const [sessionToken, setSessionToken] = useState('');
+  const [region, setRegion] = useState('');
+  const [serviceAccount, setServiceAccount] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   /** What the last check of each key said. */
   const [checked, setChecked] = useState<Record<string, string>>({});
   const spec = providers.find((entry) => entry.id === provider);
+  const kind = spec?.kind ?? 'api_key';
+  /** What the provider's credential needs before it can be added. */
+  const ready = kind === 'aws'
+    ? Boolean(accessKeyId.trim() && secretAccessKey.trim() && region.trim())
+    : kind === 'gcp_service_account'
+      ? Boolean(serviceAccount.trim())
+      : !(spec?.key === 'required' && !apiKey.trim()) && Boolean(spec?.baseUrl || baseUrl.trim());
 
   async function add(): Promise<void> {
     setBusy(true);
@@ -188,12 +204,13 @@ function CredentialSettings({
       await apiSend('POST', '/api/credentials', {
         provider,
         ...(label.trim() ? { label: label.trim() } : {}),
-        ...(baseUrl.trim() ? { baseUrl: baseUrl.trim() } : {}),
-        ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+        ...(kind === 'aws'
+          ? { accessKeyId: accessKeyId.trim(), secretAccessKey: secretAccessKey.trim(), region: region.trim(), ...(sessionToken.trim() ? { sessionToken: sessionToken.trim() } : {}) }
+          : kind === 'gcp_service_account'
+            ? { serviceAccount, ...(region.trim() ? { region: region.trim() } : {}) }
+            : { ...(baseUrl.trim() ? { baseUrl: baseUrl.trim() } : {}), ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}) }),
       });
-      setLabel('');
-      setBaseUrl('');
-      setApiKey('');
+      for (const clear of [setLabel, setBaseUrl, setApiKey, setAccessKeyId, setSecretAccessKey, setSessionToken, setRegion, setServiceAccount]) clear('');
       onChanged();
     } catch (caught) {
       setError(toMessage(caught));
@@ -265,19 +282,49 @@ function CredentialSettings({
               <TextInput value={label} maxLength={100} placeholder={spec?.label ?? ''} onChange={(event) => setLabel(event.target.value)} />
             </Field>
           </div>
-          <Field label={t('baseUrl')} hint={spec?.baseUrl ? t('baseUrlHint') : t('baseUrlRequired')}>
-            <TextInput value={baseUrl} inputMode="url" placeholder={spec?.baseUrl ?? 'http://localhost:8000/v1'} onChange={(event) => setBaseUrl(event.target.value)} />
-          </Field>
-          <Field label={spec?.key === 'optional' ? t('apiKeyOptional') : t('apiKey')}>
-            <TextInput type="password" autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} />
-          </Field>
+          {kind === 'aws' ? (
+            <>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label={t('accessKeyId')}>
+                  <TextInput autoComplete="off" spellCheck={false} value={accessKeyId} placeholder="AKIA…" onChange={(event) => setAccessKeyId(event.target.value)} />
+                </Field>
+                <Field label={t('region')} hint={t('awsRegionHint')}>
+                  <TextInput autoComplete="off" spellCheck={false} value={region} placeholder="us-east-1" onChange={(event) => setRegion(event.target.value)} />
+                </Field>
+              </div>
+              <Field label={t('secretAccessKey')}>
+                <TextInput type="password" autoComplete="off" value={secretAccessKey} onChange={(event) => setSecretAccessKey(event.target.value)} />
+              </Field>
+              <Field label={t('sessionToken')}>
+                <TextInput type="password" autoComplete="off" value={sessionToken} onChange={(event) => setSessionToken(event.target.value)} />
+              </Field>
+            </>
+          ) : kind === 'gcp_service_account' ? (
+            <>
+              <Field label={t('serviceAccount')} hint={t('serviceAccountHint')}>
+                <TextArea rows={4} spellCheck={false} autoComplete="off" value={serviceAccount} placeholder='{"type": "service_account", …}' onChange={(event) => setServiceAccount(event.target.value)} />
+              </Field>
+              <Field label={t('region')} hint={t('gcpRegionHint')}>
+                <TextInput autoComplete="off" spellCheck={false} value={region} placeholder="global" onChange={(event) => setRegion(event.target.value)} />
+              </Field>
+            </>
+          ) : (
+            <>
+              <Field label={t('baseUrl')} hint={spec?.baseUrl ? t('baseUrlHint') : t('baseUrlRequired')}>
+                <TextInput value={baseUrl} inputMode="url" placeholder={spec?.baseUrl ?? 'http://localhost:8000/v1'} onChange={(event) => setBaseUrl(event.target.value)} />
+              </Field>
+              <Field label={spec?.key === 'optional' ? t('apiKeyOptional') : t('apiKey')}>
+                <TextInput type="password" autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} />
+              </Field>
+            </>
+          )}
           <ErrorText>{error}</ErrorText>
           <div className="flex justify-end">
             <Button
               size="sm"
               variant="primary"
               busy={busy}
-              disabled={(spec?.key === 'required' && !apiKey.trim()) || (!spec?.baseUrl && !baseUrl.trim())}
+              disabled={!ready}
               onClick={() => void add()}
             >
               {t('addKey')}

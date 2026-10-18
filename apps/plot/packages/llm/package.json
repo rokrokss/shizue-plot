@@ -23,6 +23,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@huggingface/jinja": "^0.5.10",
     "jose": "^6.2.12"
   }
 }

@@ -5,17 +5,38 @@ import type { ModelCapabilities, ModelParams } from '../params.js';
 import { providerOf } from '../providers.js';
 import type { LLMAdapter } from '../types.js';
 import { anthropic } from './anthropic.js';
+import { anthropicLegacy } from './anthropicLegacy.js';
+import { bedrock } from './bedrock.js';
+import { cohere } from './cohere.js';
 import { echoFormat } from './echo.js';
 import { CATALOG_TIMEOUT_MS, type AdapterConfig, type LLMEnv, type ModelAccess, type ModelFormat, type ModelListing } from './format.js';
 import { google } from './google.js';
+import { horde } from './horde.js';
+import { kobold } from './kobold.js';
+import { mistral } from './mistral.js';
+import { novelAI } from './novelAI.js';
+import { novelList } from './novelList.js';
+import { ollama } from './ollama.js';
+import { ooba, oobaLegacy } from './ooba.js';
 import { openAIChat } from './openaiChat.js';
+import { openAILegacy } from './openaiLegacy.js';
 import { openAIResponses } from './openaiResponses.js';
+import { vertex, vertexBase } from './vertex.js';
 
 /**
- * Every request format this build speaks, RisuAI's `LLMFormat` by string ids.
- * Wave 4 adds the rest of RisuAI's formats here, one module each.
+ * Every request format this build speaks, RisuAI's `LLMFormat` by string ids,
+ * in the order the editor lists them: the chat APIs, the local servers, the
+ * text services, the legacy completions, and the tests' echo. RisuAI's NanoGPT
+ * formats are the `nanogpt` provider over the families (`providers.ts`);
+ * WebLLM and Plugin, which run in RisuAI's own page, have none.
  */
-export const FORMATS: readonly ModelFormat[] = [openAIChat, openAIResponses, anthropic, google, echoFormat];
+export const FORMATS: readonly ModelFormat[] = [
+  openAIChat, openAIResponses, anthropic, google, vertex, bedrock, mistral, cohere,
+  ollama, ooba, oobaLegacy, kobold,
+  novelAI, novelList, horde,
+  openAILegacy, anthropicLegacy,
+  echoFormat,
+];
 
 const testing = (env: LLMEnv): boolean => (env['NODE_ENV'] ?? process.env['NODE_ENV']) === 'test';
 
@@ -41,19 +62,23 @@ export interface PresetConfig {
 /** A credential with its secret opened (`credentials`). */
 export type ModelCredential =
   | { kind: 'api_key'; provider: string; baseUrl: string | null; apiKey: string }
+  | { kind: 'aws'; provider: string; accessKeyId: string; secretAccessKey: string; sessionToken?: string; region: string }
+  | { kind: 'gcp_service_account'; provider: string; clientEmail: string; privateKey: string; projectId: string; region: string }
   | { kind: 'chatgpt'; account: ChatGPTAccount };
 
-/** Whether a preset of `format` may use `credential`: the ChatGPT connection on the Responses format, a key on its provider's. */
+/** Whether a preset of `format` may use `credential`: the ChatGPT connection on the Responses format, any other on its provider's. */
 export function credentialFits(format: ModelFormat, credential: { kind: string; provider?: string }): boolean {
   if (credential.kind === 'chatgpt') return Boolean(format.chatgpt);
-  if (credential.kind !== 'api_key') return false;
-  return providerOf(credential.provider ?? '')?.formats.includes(format.id) ?? false;
+  const provider = providerOf(credential.provider ?? '');
+  if (!provider || (provider.kind ?? 'api_key') !== credential.kind) return false;
+  return provider.formats.includes(format.id);
 }
 
 /**
  * Where a preset's requests go and what they carry. A key goes only to its own
- * credential's address — the base URL it was entered with, or its provider's —
- * never to the preset's endpoint, which only a keyless preset uses.
+ * credential's address — the base URL it was entered with, or its provider's;
+ * AWS keys to their region's Bedrock, a service account to its project's
+ * Vertex — never to the preset's endpoint, which only a keyless preset uses.
  */
 export function connectionOf(
   format: ModelFormat,
@@ -65,9 +90,20 @@ export function connectionOf(
     const { account } = credential;
     return { baseUrl: CHATGPT_RESOURCE, access: { kind: 'chatgpt', accessToken: (rejected) => account.accessToken(rejected), models: () => account.models() } };
   }
-  if (credential?.kind === 'api_key') {
+  if (credential) {
     const provider = providerOf(credential.provider);
-    if (!provider || !provider.formats.includes(format.id)) throw providerFailure('credential_format_mismatch', 400);
+    if (!provider || !credentialFits(format, credential)) throw providerFailure('credential_format_mismatch', 400);
+    if (credential.kind === 'aws') {
+      const { accessKeyId, secretAccessKey, sessionToken, region } = credential;
+      return {
+        baseUrl: `https://bedrock-runtime.${region}.amazonaws.com`,
+        access: { kind: 'aws', accessKeyId, secretAccessKey, region, ...(sessionToken ? { sessionToken } : {}) },
+      };
+    }
+    if (credential.kind === 'gcp_service_account') {
+      const { clientEmail, privateKey, projectId, region } = credential;
+      return { baseUrl: vertexBase({ projectId, region }), access: { kind: 'gcp', clientEmail, privateKey, projectId, region } };
+    }
     const baseUrl = credential.baseUrl ?? provider.baseUrl;
     if (!baseUrl) throw providerFailure('endpoint_required', 400);
     const access: ModelAccess = credential.apiKey ? { kind: 'key', apiKey: credential.apiKey } : { kind: 'none' };
@@ -107,9 +143,11 @@ export async function listModels(
 
 /**
  * Whether a credential's key is good, by a call that needs it: OpenRouter's
- * `/key` (its `/models` answers anyone), the ChatGPT connection's catalog, and
- * otherwise the model listing of the provider's first format. Resolves or
- * throws the provider's refusal.
+ * `/key` (its `/models` answers anyone), the ChatGPT connection's catalog, the
+ * format's own check where its listing does not need the key (a one-token
+ * request, Horde's user lookup, a service account's token), and otherwise the
+ * model listing of the provider's first format. Resolves or throws the
+ * provider's refusal.
  */
 export async function validateCredential(credential: ModelCredential, env: LLMEnv, fetcher?: typeof fetch): Promise<void> {
   if (credential.kind === 'chatgpt') {
@@ -128,7 +166,10 @@ export async function validateCredential(credential: ModelCredential, env: LLMEn
     if (!response.ok) throw await providerHttpError(response);
     return;
   }
-  await format.listModels({ ...connection, env, ...(fetcher ? { fetch: fetcher } : {}) });
+  const catalog = { ...connection, env, ...(fetcher ? { fetch: fetcher } : {}) };
+  if (format.checkKey) await format.checkKey(catalog);
+  else await format.listModels(catalog);
 }
 
 export type { AdapterConfig, CatalogConfig, LLMEnv, ModelAccess, ModelFormat, ModelListing } from './format.js';
+export { readServiceAccount } from './vertex.js';

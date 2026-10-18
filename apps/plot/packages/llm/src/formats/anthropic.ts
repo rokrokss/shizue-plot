@@ -1,8 +1,9 @@
 import { joinUrl, providerFailure, providerFetch, providerHttpError, redact } from '../http.js';
-import { applyExtras, applyParameters, withPresetParams, type ParameterPlaces } from '../params.js';
+import { applyParameters, withPresetParams, type ParameterPlaces } from '../params.js';
 import { eventJson, IdleWatch, readSse, StopFilter } from '../stream.js';
-import type { ChatMessage, ChatRequest, LLMAdapter, StreamDone } from '../types.js';
+import type { ChatMessage, ChatRequest, LLMAdapter, StreamDelta, StreamDone } from '../types.js';
 import { CATALOG_TIMEOUT_MS, type AdapterConfig, type CatalogConfig, type ModelFormat, type ModelListing } from './format.js';
+import { postJson, watched } from './send.js';
 
 export const ANTHROPIC_VERSION = '2023-06-01';
 
@@ -122,14 +123,14 @@ export function messagesBody(req: ChatRequest): Record<string, unknown> {
 }
 
 /** The headers every Anthropic call carries. */
-const anthropicHeaders = (config: Pick<AdapterConfig, 'access' | 'headers'>): Record<string, string> => ({
+export const anthropicHeaders = (config: Pick<AdapterConfig, 'access' | 'headers'>): Record<string, string> => ({
   ...config.headers,
   ...(config.access.kind === 'key' ? { 'x-api-key': config.access.apiKey } : {}),
   'anthropic-version': ANTHROPIC_VERSION,
 });
 
 /** The codes Anthropic's error event types are told as. */
-const ERROR_TYPES: Record<string, string> = {
+export const ERROR_TYPES: Record<string, string> = {
   authentication_error: 'provider_unauthorized',
   permission_error: 'provider_unauthorized',
   rate_limit_error: 'provider_rate_limited',
@@ -139,7 +140,7 @@ const ERROR_TYPES: Record<string, string> = {
   not_found_error: 'provider_not_found',
 };
 
-interface AnthropicEvent {
+export interface AnthropicEvent {
   type: string;
   message?: { usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } };
   delta?: { type?: string; text?: string; thinking?: string; stop_reason?: string };
@@ -150,66 +151,62 @@ interface AnthropicEvent {
 const invalid = () => providerFailure('provider_invalid_stream', 502);
 
 /**
+ * The Messages stream's events, however they arrived (SSE here, Bedrock's
+ * event stream frames): a `text_delta` is the reply, a `thinking_delta` its
+ * thinking, the usage is `message_start`'s and `message_delta`'s, and the reply
+ * ends at `message_stop`; an `error` event is the provider's failure, after
+ * text or not.
+ */
+export async function* readAnthropicEvents(events: AsyncIterable<AnthropicEvent>, stop: StopFilter): AsyncGenerator<StreamDelta, StreamDone> {
+  let prompt = 0;
+  let cached: number | undefined;
+  let completion = 0;
+  for await (const event of events) {
+    if (event.type === 'message_start') {
+      const usage = event.message?.usage;
+      cached = usage?.cache_read_input_tokens;
+      prompt = (usage?.input_tokens ?? 0) + (usage?.cache_read_input_tokens ?? 0) + (usage?.cache_creation_input_tokens ?? 0);
+      completion = usage?.output_tokens ?? 0;
+    } else if (event.type === 'content_block_delta') {
+      if (event.delta?.type === 'text_delta' && event.delta.text) {
+        const out = stop.push(event.delta.text);
+        if (out) yield { type: 'text', text: out };
+      } else if (event.delta?.type === 'thinking_delta' && event.delta.thinking && !stop.done) {
+        yield { type: 'reasoning', reasoning: event.delta.thinking };
+      }
+    } else if (event.type === 'message_delta') {
+      if (typeof event.usage?.output_tokens === 'number') completion = event.usage.output_tokens;
+    } else if (event.type === 'error') {
+      throw providerFailure(ERROR_TYPES[event.error?.type ?? ''] ?? 'provider_unavailable', 502, redact(event.error?.message ?? ''));
+    } else if (event.type === 'message_stop') {
+      const rest = stop.flush();
+      if (rest) yield { type: 'text', text: rest };
+      return {
+        usage: { promptTokens: prompt, completionTokens: completion, ...(typeof cached === 'number' ? { cachedPromptTokens: cached } : {}) },
+      } satisfies StreamDone;
+    }
+  }
+  throw providerFailure('provider_stream_interrupted', 502);
+}
+
+/** An SSE body's events as JSON. */
+async function* sseEvents(body: ReadableStream<Uint8Array>, watch: IdleWatch): AsyncGenerator<AnthropicEvent> {
+  for await (const block of readSse(body, watch, { invalid })) yield eventJson<AnthropicEvent>(block.data, invalid);
+}
+
+/**
  * Anthropic's Messages API: `x-api-key` and `anthropic-version`, the system
- * text at the top level, and the stream's `content_block_delta` events — a
- * `text_delta` is the reply, a `thinking_delta` its thinking. The reply ends at
- * `message_stop`; an `error` event is the provider's failure, after text or not.
+ * text at the top level, and the stream's events (`readAnthropicEvents`).
  */
 function createAdapter(config: AdapterConfig): LLMAdapter {
-  const fetcher = config.fetch ?? fetch;
   return {
-    async *stream(request) {
+    stream(request) {
       const req = withPresetParams(request, config.params);
-      const body = messagesBody(req);
-      const headers = { ...anthropicHeaders(config) };
-      applyExtras(body, headers, config.params);
-      Object.assign(headers, anthropicHeaders(config), { 'content-type': 'application/json' });
-      const watch = new IdleWatch(req.abortSignal);
-      const stop = new StopFilter(req.stop);
-      try {
-        watch.arm();
-        const response = await providerFetch(fetcher, joinUrl(config.baseUrl, '/messages'), {
-          method: 'POST', signal: watch.signal, headers, body: JSON.stringify(body),
-        });
-        watch.disarm();
-        if (!response.ok) throw await providerHttpError(response);
+      return watched(req, async function* (watch) {
+        const response = await postJson(config, joinUrl(config.baseUrl, '/messages'), messagesBody(req), { ...config.headers }, anthropicHeaders(config), watch);
         if (!response.body) throw providerFailure('provider_stream_interrupted', 502);
-        let prompt = 0;
-        let cached: number | undefined;
-        let completion = 0;
-        for await (const block of readSse(response.body, watch, { invalid })) {
-          const event = eventJson<AnthropicEvent>(block.data, invalid);
-          if (event.type === 'message_start') {
-            const usage = event.message?.usage;
-            cached = usage?.cache_read_input_tokens;
-            prompt = (usage?.input_tokens ?? 0) + (usage?.cache_read_input_tokens ?? 0) + (usage?.cache_creation_input_tokens ?? 0);
-            completion = usage?.output_tokens ?? 0;
-          } else if (event.type === 'content_block_delta') {
-            if (event.delta?.type === 'text_delta' && event.delta.text) {
-              const out = stop.push(event.delta.text);
-              if (out) yield { type: 'text', text: out };
-            } else if (event.delta?.type === 'thinking_delta' && event.delta.thinking && !stop.done) {
-              yield { type: 'reasoning', reasoning: event.delta.thinking };
-            }
-          } else if (event.type === 'message_delta') {
-            if (typeof event.usage?.output_tokens === 'number') completion = event.usage.output_tokens;
-          } else if (event.type === 'error') {
-            throw providerFailure(ERROR_TYPES[event.error?.type ?? ''] ?? 'provider_unavailable', 502, redact(event.error?.message ?? ''));
-          } else if (event.type === 'message_stop') {
-            const rest = stop.flush();
-            if (rest) yield { type: 'text', text: rest };
-            return {
-              usage: { promptTokens: prompt, completionTokens: completion, ...(typeof cached === 'number' ? { cachedPromptTokens: cached } : {}) },
-            } satisfies StreamDone;
-          }
-        }
-        throw providerFailure('provider_stream_interrupted', 502);
-      } catch (error) {
-        if (watch.timedOut) throw providerFailure('provider_timeout', 504);
-        throw error;
-      } finally {
-        watch.disarm();
-      }
+        return yield* readAnthropicEvents(sseEvents(response.body, watch), new StopFilter(req.stop));
+      });
     },
   };
 }

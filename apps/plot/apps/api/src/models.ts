@@ -1,5 +1,5 @@
 import { chats, modelPresets, user, type Credential, type Db, type ModelPreset } from '@shizue/db';
-import { adapterFor, listModels, providerOf, type LLMAdapter, type ModelBinding, type ModelCapabilities, type ModelParams } from '@shizue/llm';
+import { adapterFor, listModels, providerOf, type LLMAdapter, type ModelBinding, type ModelCapabilities, type ModelListing, type ModelParams } from '@shizue/llm';
 import { and, eq, sql } from 'drizzle-orm';
 import { loadCredential, openCredential } from './credentials.js';
 import type { AppDeps, Tx } from './deps.js';
@@ -270,12 +270,53 @@ export async function releasePreset(tx: Tx, userId: string, presetId: string): P
 }
 
 /**
+ * Ids a chat does not run on, whatever the provider: embeddings (the common
+ * open ones by name), speech and transcription, pictures and video,
+ * moderation, realtime, reranking, OCR.
+ */
+const NOT_FOR_CHAT = /(embed|bge-|e5-|gte-|minilm|sentence-transformers|whisper|tts|transcri|audio|realtime|speech|image|dall-e|sora|veo|imagen|moderation|rerank|ocr|guard)/i;
+/** OpenAI's that take no chat: the completion models, and the ones that act with tools. */
+const OPENAI_NOT_FOR_CHAT = /(-instruct|^babbage|^davinci|codex|computer-use|deep-research|search)/;
+/**
+ * A provider's sensible first chat model, in order of preference: the first
+ * listed id the first pattern that matches any picks. A provider without one,
+ * or a listing none of them matches, gets its first remaining model.
+ */
+const PREFERRED: Readonly<Record<string, readonly RegExp[]>> = {
+  openai: [/^gpt-5(\.\d+)?-mini$/, /^gpt-4\.1-mini$/, /^gpt-4o-mini$/, /^gpt-/],
+  anthropic: [/sonnet/, /^claude-/],
+  google: [/^gemini-[\d.]+-flash$/, /^gemini-/],
+  vertex: [/^gemini-[\d.]+-flash$/],
+  aws: [/sonnet/],
+  openrouter: [/^openai\/gpt-5(\.\d+)?-mini$/, /^anthropic\/claude-sonnet/, /^google\/gemini-[\d.]+-flash$/],
+  deepseek: [/^deepseek-chat$/],
+  mistral: [/^mistral-(small|medium|large)-latest$/, /^mistral-/],
+  cohere: [/^command-a/, /^command-r/],
+  nanogpt: [/^(openai\/)?gpt-5(\.\d+)?-mini$/],
+};
+
+/**
+ * The model a new credential's first preset is made on: not one a chat cannot
+ * run on (an OpenAI key's list opens on `babbage-002`), then the provider's
+ * preference (`PREFERRED`), then the first that remains.
+ */
+export function preferredModel(provider: string, models: readonly ModelListing[]): ModelListing | undefined {
+  const usable = models.filter((model) => !NOT_FOR_CHAT.test(model.id) && !(provider === 'openai' && OPENAI_NOT_FOR_CHAT.test(model.id)));
+  for (const pattern of PREFERRED[provider] ?? []) {
+    const match = usable.find((model) => pattern.test(model.id));
+    if (match) return match;
+  }
+  return usable[0];
+}
+
+/**
  * A first model for an owner who has none, so a new install can chat without
  * building a preset first: connecting ChatGPT or saving an API key while no
  * model preset exists makes one on that credential — the account's first
- * catalog model, or the first model the key's provider lists — and makes it
- * the default main where none is set. Best effort: a listing that fails or
- * comes back empty makes none, and the connection or the key stays saved.
+ * catalog model, or the model the key's provider lists that `preferredModel`
+ * picks — and makes it the default main where none is set. Best effort: a
+ * listing that fails or has nothing to chat on makes none, and the connection
+ * or the key stays saved.
  */
 export async function ensureFirstPreset(deps: ModelDeps, row: Credential): Promise<void> {
   const hasPreset = async (db: Db | Tx): Promise<boolean> =>
@@ -285,7 +326,9 @@ export async function ensureFirstPreset(deps: ModelDeps, row: Credential): Promi
     const credential = openCredential(deps, row);
     const format = credential.kind === 'chatgpt' ? 'openai-responses' : providerOf(row.provider)?.formats[0];
     if (!format) return;
-    const [first] = credential.kind === 'chatgpt' ? await credential.account.models() : await listModels(format, null, credential, deps.env);
+    const first = credential.kind === 'chatgpt'
+      ? (await credential.account.models())[0]
+      : preferredModel(row.provider, await listModels(format, null, credential, deps.env));
     if (!first) return;
     await deps.db.transaction(async (tx) => {
       if (await hasPreset(tx)) return;
