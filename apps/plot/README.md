@@ -6,8 +6,8 @@
 
 ## 실행과 검증
 
-설치, 개발 서버와 테스트 명령은 리포지터리 루트
-[README.md](../../README.md)를 따른다. 설정 예시는 `.env.example`에 있다.
+설치는 [docs/GUIDE.md](../../docs/GUIDE.md), 개발 서버와 테스트 명령은
+[docs/DEVELOPMENT.md](../../docs/DEVELOPMENT.md)를 따른다. 설정 예시는 `.env.example`에 있다.
 앱은 한 프로세스다: `make dev`가 API(`/api/*`)와 웹(`next dev`)을 포트 13000 하나로 띄우고,
 이 디렉터리의 `.env`를 읽는다. 쓰는 사람은 `npx shizue-plot`으로 설치판을 띄운다.
 데이터는 앱 폴더 하나에 있다 — PGlite 데이터베이스(`db/`)와 파일(`files/`) —

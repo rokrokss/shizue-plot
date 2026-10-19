@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="base.css">
+<style>
+  .canvas { width: 1400px; height: 560px; }
+  .left { position: absolute; left: 80px; top: 64px; width: 640px; }
+  .brand img { width: 64px; height: 64px; }
+  .headline { font-size: 64px; margin-top: 30px; }
+  .checks { margin-top: 30px; }
+  .w1 { left: 720px; top: 48px; width: 560px; height: 470px; transform: rotate(-2deg); }
+  .p1 { left: 1160px; top: 86px; width: 196px; transform: rotate(3deg); }
+  .grass { height: 26px; }
+</style>
+</head>
+<body>
+<div class="canvas mint">
+  <div class="left">
+    <div class="brand"><img src="../../../apps/plot/apps/web/public/brand/mark.svg" alt=""><span>shizue</span></div>
+    <h1 class="headline">Play RisuAI cards<br>on your <span class="w">ChatGPT plan</span></h1>
+    <ul class="checks">
+      <li>Import from RisuRealm in one paste</li>
+      <li>Every RisuAI feature — Lua, lorebooks, modules</li>
+      <li>Every model RisuAI takes, on your own keys</li>
+    </ul>
+  </div>
+
+  <div class="window w1">
+    <div class="bar"><i></i><i></i><i></i><span class="url">localhost:13000</span></div>
+    <img class="shot column" src="../shots/chat-top.png" alt="">
+  </div>
+  <div class="phone p1"><div class="screen"><img src="../shots/chat-phone.png" alt=""></div></div>
+
+  <div class="grass"></div>
+  <div class="bunny" style="--s:3.4; left:600px; bottom:26px"></div>
+</div>
+</body>
+</html>

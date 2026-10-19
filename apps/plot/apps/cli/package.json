@@ -3,6 +3,24 @@
   "version": "0.1.0",
   "description": "A character-chat app you run on your own computer: RisuAI and SillyTavern cards, played on your ChatGPT plan or your own API keys.",
   "license": "GPL-3.0-only",
+  "//repository": "The package's README is the repository's, so npm resolves its relative images and links against the repository root.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rokrokss/shizue-plot.git"
+  },
+  "homepage": "https://github.com/rokrokss/shizue-plot#readme",
+  "bugs": "https://github.com/rokrokss/shizue-plot/issues",
+  "keywords": [
+    "risuai",
+    "risurealm",
+    "sillytavern",
+    "character-card",
+    "character-chat",
+    "roleplay",
+    "chatgpt",
+    "llm",
+    "local-first"
+  ],
   "type": "module",
   "bin": {
     "shizue-plot": "bin/shizue-plot.js"

@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="base.css">
+<style>
+  .canvas { width: 1280px; height: 800px; }
+  .top { position: absolute; left: 80px; top: 56px; right: 80px; }
+  .headline { font-size: 60px; margin-top: 22px; }
+  .sub { margin-top: 16px; max-width: 860px; }
+  .cmd {
+    display: inline-block; margin-top: 22px; padding: 10px 18px; border-radius: 12px; background: var(--ink); color: #fff;
+    font: 600 20px/1.2 ui-monospace, Menlo, monospace; box-shadow: 4px 4px 0 var(--mint);
+  }
+  .cmd b { color: var(--mint-2); font-weight: 600; }
+  .w1 { left: 80px; top: 350px; width: 880px; }
+  .p1 { left: 900px; top: 250px; width: 280px; transform: rotate(3deg); }
+</style>
+</head>
+<body>
+<div class="canvas cream">
+  <div class="top">
+    <span class="eyebrow"><span class="dot"></span>Yours</span>
+    <h1 class="headline">On your computer, <span class="m">and your phone</span></h1>
+    <p class="sub">No account and no server of ours: everything lives in one folder you can back up. Pair a phone with a QR code and keep reading.</p>
+    <div class="cmd"><b>$</b> npx shizue-plot</div>
+  </div>
+  <div class="window w1">
+    <div class="bar"><i></i><i></i><i></i><span class="url">localhost:13000</span></div>
+    <img class="shot" src="../shots/library.png" alt="">
+  </div>
+  <div class="phone p1"><div class="screen"><img src="../shots/chat-phone.png" alt=""></div></div>
+  <div class="grass"></div>
+  <div class="bunny" style="--s:3.6; left:1060px; bottom:30px"></div>
+</div>
+</body>
+</html>

@@ -1,0 +1,123 @@
+/* Shared look of the promo images, after the sibling shizue's store images:
+   the mint field with a pixel dot grid, the ink wordmark and the garden bunny.
+   The app itself is dark, so its screenshots sit in dark window frames. */
+
+@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Silkscreen&display=block');
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css');
+
+:root {
+  --cream: #f6f3dc;
+  --ink: #10302b;
+  --ink-2: #3c5652;
+  --mint: #32ccbc;
+  --mint-2: #90f7ec;
+  --mint-deep: #13a596;
+  --head: 'Bricolage Grotesque', system-ui, sans-serif;
+  --pixel: 'Silkscreen', monospace;
+  --ui: 'Pretendard Variable', -apple-system, system-ui, sans-serif;
+  --brand: '../../../apps/plot/apps/web/public/brand';
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { background: transparent; }
+body { -webkit-font-smoothing: antialiased; overflow: hidden; }
+
+.canvas { position: relative; overflow: hidden; }
+/* The marquee field: mint gradient under a faint dot grid. */
+.canvas.mint {
+  background-color: var(--mint);
+  background-image:
+    radial-gradient(rgba(16, 48, 43, 0.12) 1.4px, transparent 1.5px),
+    linear-gradient(120deg, #a6f9f0 0%, #5bdccd 45%, #32ccbc 100%);
+  background-size: 24px 24px, 100% 100%;
+  background-position: 8px 8px, 0 0;
+}
+/* The feature field: cream with a mint glow, as the store screenshots. */
+.canvas.cream {
+  background-color: var(--cream);
+  background-image:
+    radial-gradient(rgba(16, 48, 43, 0.08) 1.2px, transparent 1.3px),
+    radial-gradient(circle at 92% 0%, rgba(144, 247, 236, 0.85) 0, rgba(144, 247, 236, 0) 55%),
+    radial-gradient(circle at 0% 100%, rgba(232, 181, 172, 0.45) 0, rgba(232, 181, 172, 0) 45%);
+  background-size: 24px 24px, 100% 100%, 100% 100%;
+  background-position: 12px 12px, 0 0, 0 0;
+}
+
+.brand { display: flex; align-items: center; gap: 16px; }
+.brand img { image-rendering: pixelated; filter: drop-shadow(4px 4px 0 rgba(16, 48, 43, 0.9)); }
+.brand span { font: 800 52px/1 var(--head); font-variation-settings: 'opsz' 96; letter-spacing: -0.04em; color: var(--ink); }
+
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 10px;
+  font: 400 15px/1 var(--pixel); letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink);
+  background: #fff; border: 2px solid var(--ink); border-radius: 999px; padding: 7px 14px 8px;
+  box-shadow: 3px 3px 0 var(--ink);
+}
+.eyebrow .dot { width: 8px; height: 8px; background: var(--mint); outline: 2px solid var(--ink); }
+
+.headline {
+  font-family: var(--head); font-weight: 800; font-variation-settings: 'opsz' 96;
+  color: var(--ink); letter-spacing: -0.035em; line-height: 1;
+}
+/* A word lifted out of the headline: white box, ink border, hard shadow. */
+.headline .w {
+  display: inline-block; background: #fff; border: 2px solid var(--ink); border-radius: 10px;
+  padding: 0 10px 2px; margin-left: -2px; box-shadow: 4px 4px 0 var(--ink); line-height: 1.05;
+}
+/* A softer lift for the cream field: the mint marker under the word. */
+.headline .m { background: linear-gradient(transparent 58%, var(--mint-2) 58%); padding: 0 4px; margin: 0 -4px; }
+.sub { font: 500 22px/1.4 var(--head); font-variation-settings: 'opsz' 24; color: var(--ink-2); letter-spacing: -0.01em; }
+
+.checks { list-style: none; display: grid; gap: 10px; }
+.checks li { display: flex; align-items: center; gap: 12px; font: 600 21px/1.25 var(--head); color: var(--ink); letter-spacing: -0.01em; }
+.checks li::before {
+  content: ''; flex: none; width: 22px; height: 22px; border-radius: 6px; background: #fff; border: 2px solid var(--ink);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%2310302b' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-size: 16px; background-position: center; background-repeat: no-repeat;
+}
+
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 13px 0 10px; border-radius: 10px;
+  background: #fff; border: 1.5px solid rgba(16, 48, 43, 0.16); font: 600 15px var(--head); color: var(--ink); white-space: nowrap;
+}
+.chip i { width: 9px; height: 9px; border-radius: 2px; display: block; background: var(--mint); }
+
+/* A dark browser window around an app screenshot. */
+.window {
+  position: absolute; overflow: hidden; border-radius: 14px; background: #151516;
+  border: 1px solid rgba(16, 48, 43, 0.35);
+  box-shadow: 0 40px 80px -24px rgba(16, 48, 43, 0.55), 0 14px 28px -12px rgba(16, 48, 43, 0.35);
+}
+.window .bar { height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 14px; background: #1c1c1e; border-bottom: 1px solid #2c2c2f; }
+.window .bar i { width: 11px; height: 11px; border-radius: 50%; background: #3a3a3d; display: block; }
+.window .bar i:nth-child(1) { background: #ff5f57; } .window .bar i:nth-child(2) { background: #febc2e; } .window .bar i:nth-child(3) { background: #28c840; }
+.window .bar .url {
+  margin-left: 14px; flex: 1; max-width: 420px; height: 24px; border-radius: 7px; background: #28282a; color: #a1a1a6;
+  font: 500 12.5px/24px var(--ui); padding: 0 12px;
+}
+.window img.shot { display: block; width: 100%; }
+/* The chat keeps a 768px column in the middle of the window: show the column, not the margins. */
+.window img.shot.column { width: 150%; margin-left: -25%; }
+
+/* A phone around a phone screenshot. */
+.phone {
+  position: absolute; padding: 9px; border-radius: 46px; background: #0b0b0c;
+  box-shadow: 0 40px 80px -20px rgba(16, 48, 43, 0.6), 0 0 0 2px #2b2b2e inset;
+}
+/* The screenshot starts at the app's header, so the screen gives it a status bar's room under the notch. */
+.phone .screen { overflow: hidden; border-radius: 38px; background: #151516; padding-top: 11%; }
+.phone img { display: block; width: 100%; }
+.phone::after { content: ''; position: absolute; top: 16px; left: 50%; width: 30%; height: 4.2%; transform: translateX(-50%); border-radius: 12px; background: #0b0b0c; }
+
+/* An app card lifted out on its own (the ChatGPT card). */
+.cardshot { position: absolute; border-radius: 18px; overflow: hidden; box-shadow: 0 34px 70px -18px rgba(16, 48, 43, 0.6), 0 0 0 1px rgba(16, 48, 43, 0.25); }
+.cardshot img { display: block; width: 100%; }
+
+/* The garden strip and its bunny (the app's own sprite, first frame). */
+.grass { position: absolute; left: 0; right: 0; bottom: 0; height: 30px; background: #1f8f83; }
+.grass::before { content: ''; position: absolute; left: 0; right: 0; top: -10px; height: 10px; background: repeating-linear-gradient(90deg, #1f8f83 0 10px, transparent 10px 20px); }
+.bunny {
+  position: absolute; width: calc(14px * var(--s, 4)); height: calc(17px * var(--s, 4));
+  background: url('../../../apps/plot/apps/web/public/brand/standing.png') 0 0 / auto 100% no-repeat; image-rendering: pixelated;
+}

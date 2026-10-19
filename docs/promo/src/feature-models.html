@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="base.css">
+<style>
+  .canvas { width: 1280px; height: 800px; }
+  .top { position: absolute; left: 80px; top: 56px; right: 80px; }
+  .headline { font-size: 60px; margin-top: 22px; }
+  .sub { margin-top: 16px; max-width: 980px; }
+  .chips { margin-top: 20px; max-width: 1120px; }
+  /* The settings column alone: the sidebar and the site header cropped away. */
+  .w1 { left: 80px; top: 380px; width: 700px; }
+  .w1 .view { overflow: hidden; }
+  .w1 img.shot { width: 150%; margin-left: -46%; margin-top: -47px; }
+  .c1 { left: 690px; top: 410px; width: 510px; transform: rotate(2deg); }
+</style>
+</head>
+<body>
+<div class="canvas cream">
+  <div class="top">
+    <span class="eyebrow"><span class="dot"></span>Models</span>
+    <h1 class="headline">Your <span class="m">ChatGPT plan</span>, or any key RisuAI takes</h1>
+    <p class="sub">Sign in with ChatGPT and chat on the plan you already pay for, with no API key. Or bring a key for any request format RisuAI has, or a model server on this computer.</p>
+    <div class="chips">
+      <span class="chip"><i style="background:#10a37f"></i>ChatGPT plan</span>
+      <span class="chip"><i style="background:#10a37f"></i>OpenAI</span>
+      <span class="chip"><i style="background:#d97757"></i>Anthropic</span>
+      <span class="chip"><i style="background:#4b8cf5"></i>Gemini</span>
+      <span class="chip"><i style="background:#6566f1"></i>OpenRouter</span>
+      <span class="chip"><i style="background:#4d6bfe"></i>DeepSeek</span>
+      <span class="chip"><i style="background:#ff9900"></i>AWS Bedrock</span>
+      <span class="chip"><i style="background:#4285f4"></i>Vertex AI</span>
+      <span class="chip"><i style="background:#fa520f"></i>Mistral</span>
+      <span class="chip"><i style="background:#39594d"></i>Cohere</span>
+      <span class="chip"><i style="background:#8c6cf0"></i>NovelAI</span>
+      <span class="chip"><i style="background:#3c5652"></i>Ollama · LM Studio · KoboldCpp</span>
+      <span class="chip"><i style="background:#c9a227"></i>AI Horde</span>
+    </div>
+  </div>
+  <div class="window w1">
+    <div class="bar"><i></i><i></i><i></i><span class="url">localhost:13000/settings</span></div>
+    <div class="view"><img class="shot" src="../shots/models.png" alt=""></div>
+  </div>
+  <div class="cardshot c1"><img src="../shots/chatgpt.png" alt=""></div>
+</div>
+</body>
+</html>

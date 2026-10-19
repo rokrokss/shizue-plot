@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="base.css">
+<style>
+  /* GitHub's link preview: unfurls show it at about 45%, so the left column carries the message. */
+  .canvas { width: 1280px; height: 640px; }
+  .left { position: absolute; left: 68px; top: 84px; width: 640px; }
+  .brand img { width: 62px; height: 62px; }
+  .brand span { font-size: 50px; }
+  .headline { font-size: 60px; margin-top: 32px; }
+  .checks { margin-top: 32px; gap: 12px; }
+  .checks li { font-size: 23px; }
+  .w1 { left: 700px; top: 66px; width: 500px; height: 520px; transform: rotate(-2deg); }
+  .p1 { left: 1050px; top: 150px; width: 196px; transform: rotate(3deg); }
+</style>
+</head>
+<body>
+<div class="canvas mint">
+  <div class="left">
+    <div class="brand"><img src="../../../apps/plot/apps/web/public/brand/mark.svg" alt=""><span>shizue</span></div>
+    <h1 class="headline">Play RisuAI cards<br>on your <span class="w">ChatGPT plan</span></h1>
+    <ul class="checks">
+      <li>Import from RisuRealm in one paste</li>
+      <li>Every RisuAI feature, every model it takes</li>
+      <li>Free and open source, on your own computer</li>
+    </ul>
+  </div>
+
+  <div class="window w1">
+    <div class="bar"><i></i><i></i><i></i><span class="url">localhost:13000</span></div>
+    <img class="shot column" src="../shots/chat-top.png" alt="">
+  </div>
+  <div class="phone p1"><div class="screen"><img src="../shots/chat-phone.png" alt=""></div></div>
+
+  <div class="grass"></div>
+  <div class="bunny" style="--s:3.4; left:560px; bottom:30px"></div>
+</div>
+</body>
+</html>

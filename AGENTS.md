@@ -23,7 +23,10 @@ changing what it describes.
 - [docs/design/shizue-ui.md](docs/design/shizue-ui.md) sets the UI direction:
   the cream, mint and dark-green system adapted from the sibling repo
   `../shizue`, including its store promotion images. Read it before any UI work.
-- [README.md](README.md) covers setup, testing and migrations in more detail.
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) covers setup, testing and
+  migrations in more detail, and [docs/GUIDE.md](docs/GUIDE.md) the installed
+  app. The README is the project's front page; its images are made in
+  [docs/promo](docs/promo/README.md).
 
 ## Layout
 
