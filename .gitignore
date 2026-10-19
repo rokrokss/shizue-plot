@@ -26,3 +26,6 @@ coverage/
 # Share project settings only; local settings and worktrees stay private.
 .claude/*
 !.claude/settings.json
+
+reports/
+research_notes/
