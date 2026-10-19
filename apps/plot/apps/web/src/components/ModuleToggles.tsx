@@ -131,7 +131,7 @@ export function ModuleToggles({
     });
 
   return (
-    <section data-testid="chat-toggles" className="space-y-3 border-t border-line pt-5">
+    <section data-testid="chat-toggles" className="space-y-3 border-t border-line pt-5 first:border-t-0 first:pt-0">
       <h2 className="text-xs font-medium text-muted">{t('toggles')}</h2>
       {jailbreak ? (
         <div data-testid="jailbreak-toggle" className="space-y-1">

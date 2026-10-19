@@ -120,7 +120,7 @@ export function ReaderModules({
   };
 
   return (
-    <section data-testid="reader-modules" className="space-y-3 border-t border-line pt-5">
+    <section data-testid="reader-modules" className="space-y-3 border-t border-line pt-5 first:border-t-0 first:pt-0">
       <h2 className="text-xs font-medium text-muted">{t('readerModules')}</h2>
       <p className="text-xs text-muted">{t('readerModulesHint')}</p>
       {library.length === 0 ? (

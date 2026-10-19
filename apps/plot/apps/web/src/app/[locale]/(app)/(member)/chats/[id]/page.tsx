@@ -3076,9 +3076,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       </div>
 
       {/* Settings stay above the list rather than inside it: opening the panel
-          should not push the conversation off the bottom of its own container. */}
+          should not push the conversation off the bottom of its own container.
+          It takes up to 70% of the screen, room for a module's long list of
+          toggles, but always leaves 19rem for the header and the composer at its
+          tallest (`max-h-48`), so nothing below it is pushed off the screen; on
+          a narrow screen the emotion band steps aside meanwhile. */}
       {panelOpen ? (
-        <div className="max-h-[35dvh] shrink-0 overflow-y-auto border-b border-line">
+        <div className="max-h-[min(70dvh,calc(100dvh-19rem))] shrink-0 overflow-y-auto border-b border-line">
           <div className="mx-auto w-full max-w-[768px] px-2.5 py-5">
             <ChatPanel
               chatId={id}
@@ -3158,7 +3162,13 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           the column of the conversation and the composer. The screen is a band
           above the column on a narrow screen and a column beside it on a wide one. */}
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        {emotionScreen.length > 0 ? <EmotionScreen chatId={state.chat.id} slots={emotionScreen} /> : null}
+        {emotionScreen.length > 0 ? (
+          <EmotionScreen
+            chatId={state.chat.id}
+            slots={emotionScreen}
+            {...(panelOpen ? { className: 'max-lg:hidden' } : {})}
+          />
+        ) : null}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {/* The conversation's area. What a card draws behind the chat stands still
               in it while the list scrolls over it, as RisuAI's background does, and
@@ -3713,17 +3723,20 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             onChange={(patch) => void updateSettings(patch)}
             {...(languageView ? { language: languageView } : {})}
           />
-          <Button
-            className="mt-5 w-full"
-            variant={panelOpen ? 'secondary' : 'ghost'}
+          {/* A row boxed like the fields above it, with a chevron: on the sheet's
+              raised surface a filled or bare button read as a heading. */}
+          <button
+            type="button"
             aria-expanded={panelOpen}
             onClick={() => {
               setPanelOpen((open) => !open);
               setSheetOpen(false);
             }}
+            className="mt-5 flex h-11 w-full items-center justify-between gap-3 rounded-xl border border-line bg-surface px-3.5 body14 font-medium text-fg transition-colors hover:border-muted/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
           >
             {t('notes')}
-          </Button>
+            <Icon name="chevron" className={cx('size-4 text-muted', !panelOpen && '-rotate-90')} />
+          </button>
           {/* The look, which a phone otherwise reaches only from the tab bar's menu —
               and a conversation has no tab bar. */}
           <div className="mt-5 flex items-center justify-between gap-3 border-t border-line pt-4">

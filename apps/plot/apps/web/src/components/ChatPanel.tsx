@@ -208,7 +208,7 @@ export function ChatPanel({
   /**
    * The chat's RisuAI modules: the toggles the modules on it and the members'
    * cards declare, and the reader's own module library (`ModuleToggles`,
-   * `ReaderModules`) — drawn after the display settings.
+   * `ReaderModules`) — drawn first, as they are what a reader changes mid-chat.
    */
   modules?: ReactNode;
 }) {
@@ -322,11 +322,16 @@ export function ChatPanel({
 
   return (
     <div data-testid="chat-panel" className="space-y-5 rounded-xl border border-line bg-surface/60 p-5">
+      {/* The toggles and modules come first, so a reader switching one mid-chat
+          need not scroll past the rest. Each section draws the line above it,
+          except the one that comes first. */}
+      {modules}
+
       {/* Who is in the room. A reply names its speaker line by line, so the roster
-          is what those names are read against — and it is the first thing the
-          panel can answer about a chat that holds more than one voice. */}
+          is what those names are read against — and, after the modules, the first
+          thing the panel can answer about a chat that holds more than one voice. */}
       {members.length > 0 ? (
-        <section data-testid="chat-members" className="space-y-3 border-b border-line pb-5">
+        <section data-testid="chat-members" className="space-y-3 border-t border-line pt-5 first:border-t-0 first:pt-0">
           <h2 className="text-xs font-medium text-muted">{t('members')}</h2>
           <ul className="flex flex-wrap gap-x-4 gap-y-2">
             {members.map((member) => {
@@ -372,7 +377,7 @@ export function ChatPanel({
         </section>
       ) : null}
 
-      <section data-testid="author-note" className="space-y-3">
+      <section data-testid="author-note" className="space-y-3 border-t border-line pt-5 first:border-t-0 first:pt-0">
         <Field label={t('authorNote')} hint={t('authorNoteHint')}>
           <TextArea
             rows={4}
@@ -628,8 +633,6 @@ export function ChatPanel({
         </div>
         <p className="text-xs text-muted">{t('componentTurnsHint')}</p>
       </section>
-
-      {modules}
 
       {scriptSimilarity ? <EmbeddingModelSetting /> : null}
 

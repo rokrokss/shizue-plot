@@ -68,8 +68,17 @@ function EmotionPicture({ src, alt }: { src: string | null; alt: string }) {
  * split between them as RisuAI's `EmotionBox` splits it. On a narrow screen it
  * is a portrait band at the top of the chat that folds to a slim bar — the fold
  * remembered per chat — and on a wide one a column beside the chat, full height.
+ * `className` is the page's, which hides the band while the notes panel takes the height.
  */
-export function EmotionScreen({ chatId, slots }: { chatId: string; slots: readonly EmotionSlot[] }) {
+export function EmotionScreen({
+  chatId,
+  slots,
+  className,
+}: {
+  chatId: string;
+  slots: readonly EmotionSlot[];
+  className?: string;
+}) {
   const t = useTranslations('chat');
   // Read on the first render — the chat only draws this once its state has come
   // in the browser, so there is no server markup to disagree with — and again
@@ -91,6 +100,7 @@ export function EmotionScreen({ chatId, slots }: { chatId: string; slots: readon
         'relative shrink-0 overflow-hidden border-b border-line bg-bubble',
         'lg:h-auto lg:w-2/5 lg:border-r lg:border-b-0',
         collapsed ? 'h-9' : 'h-[33dvh]',
+        className,
       )}
     >
       <div className={cx('size-full', collapsed ? 'hidden lg:flex' : 'flex')}>

@@ -604,6 +604,12 @@ test('the open notes panel scrolls inside itself, never the page', async () => {
   // scrolls slides the chat's header and the panel's top off the screen.
   const overflow = await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight);
   expect(overflow).toBeLessThanOrEqual(1);
+  // Nor does the panel push the composer off the screen once it grows to its tallest.
+  const composer = page.getByPlaceholder('메시지를 입력하세요');
+  await composer.fill(Array.from({ length: 15 }, (_, line) => `${line + 1}`).join('\n'));
+  await expect(composer).toBeInViewport({ ratio: 1 });
+  expect(await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight)).toBeLessThanOrEqual(1);
+  await composer.fill('');
 });
 
 test('attaches a saved note to the chat', async () => {
