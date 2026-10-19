@@ -1289,7 +1289,7 @@ async function referencedAssets(
     .where(eq(plotAssets.plotId, plotId))
     .orderBy(asc(plotAssets.createdAt), asc(plotAssets.slug));
   const slugOf = assetResolver(rows);
-  const referenced = new Set(refs.map(slugOf));
+  const referenced = new Set(refs.map((ref) => slugOf(ref)));
   return rows
     .filter((asset) => referenced.has(asset.slug))
     .map((asset) => ({ slug: asset.slug, url: assetUrl(plotId, asset.slug), mime: asset.mime }));

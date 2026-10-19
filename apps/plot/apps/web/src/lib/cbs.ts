@@ -404,7 +404,7 @@ function host(ctx: CbsContext, budget: Budget, attributes: Set<CbsNode>, prose =
 
   const asset = (call: CbsCall, kind: AssetMacroKind): CbsValue => {
     if (kind === 'drop') return { text: '' };
-    const found = lookupAsset(call.args.rest(1)?.value().text ?? '', ctx.assets, ctx.resolveAsset);
+    const found = lookupAsset(call.args.rest(1)?.value().text ?? '', ctx.assets, ctx.resolveAsset, call.name);
     if (!found) return { text: '' };
     const src = read(found.src, budget);
     if (kind === 'url' || call.mode === 'arg' || attributes.has(call.macro)) return { text: src };

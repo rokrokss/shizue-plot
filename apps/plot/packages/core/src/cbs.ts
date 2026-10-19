@@ -2507,17 +2507,54 @@ const foldSlug = (raw: string): string =>
 
 const IMAGE_EXTENSION = /\.(?:png|jpe?g|webp|gif|avif|bmp)$/;
 
+/** RisuAI's `assetMaxDifference` as it ships: the farthest a name may be from a reference and still be its picture. */
+const ASSET_MAX_DIFFERENCE = 4;
+/** The extensions RisuAI's `trimmer` takes off, in its order. */
+const TRIMMED_EXTENSIONS = ['webp', 'png', 'jpg', 'jpeg', 'gif', 'mp4', 'webm', 'avi', 'm4p', 'm4v', 'mp3', 'wav', 'ogg'];
+
+/**
+ * RisuAI's `trimmer` (parser.svelte.ts): a name without its media extension and
+ * without `[_ -.]` — `_` and the range from the space to `.`, so `!` through
+ * `-` go too, as RisuAI's class reads.
+ */
+function trimmedName(name: string): string {
+  let out = name;
+  for (const extension of TRIMMED_EXTENSIONS) {
+    if (out.endsWith(`.${extension}`)) out = out.slice(0, -extension.length - 1);
+  }
+  return out.trim().replace(/[_ -.]/g, '');
+}
+
+/** RisuAI's `getDistance`: the Levenshtein distance between two names. */
+function editDistance(a: string, b: string): number {
+  let previous = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i += 1) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      row[j] = Math.min(previous[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1), previous[j]! + 1, row[j - 1]! + 1);
+    }
+    previous = row;
+  }
+  return previous[b.length]!;
+}
+
 /**
  * Builds the lookup from a reference to the slug it means, once per asset list.
  *
  * In order: the slug as written; then the card's own name for the image,
  * compared without case as RisuAI does; then both without an image extension,
  * because a card may store `profile` and write `profile.png`, or the reverse;
- * and last the slug the import would have folded the reference into. RisuAI
- * also guesses at the nearest name by edit distance — not here: a wrong picture
- * is worse than none.
+ * then the slug the import would have folded the reference into; and last the
+ * nearest name, as RisuAI's `getClosestMatch` finds it when nothing is named
+ * exactly: names and reference lower-cased and `trimmedName`d, the first asset
+ * at the smallest edit distance, if that is at most 4 — so a reply that writes
+ * `daily_megumi_shocked` for the card's `daily.megumi.shocked.webp` still draws
+ * it. The names are the card's (the slug for an upload), and every asset the
+ * list holds is a candidate where RisuAI looks only at the character's own.
+ * `{{emotion::…}}` takes no nearest name (`macro`), as RisuAI's looks up the
+ * emotion pictures by their names alone.
  */
-export function assetResolver(assets: readonly NamedAsset[]): (ref: string) => string | undefined {
+export function assetResolver(assets: readonly NamedAsset[]): (ref: string, macro?: string) => string | undefined {
   const slugs = new Set(assets.map((asset) => asset.slug));
   const byName = new Map<string, string>();
   const byStem = new Map<string, string>();
@@ -2528,7 +2565,28 @@ export function assetResolver(assets: readonly NamedAsset[]): (ref: string) => s
     const stem = name.replace(IMAGE_EXTENSION, '');
     if (!byStem.has(stem)) byStem.set(stem, asset.slug);
   }
-  return (ref) => {
+  // Built at the first miss, and each miss answered once: a reply names the same few pictures again and again.
+  let trimmedNames: { slug: string; name: string }[] | undefined;
+  const nearestOf = new Map<string, string | undefined>();
+  const nearest = (ref: string): string | undefined => {
+    const wanted = trimmedName(ref.toLowerCase());
+    if (nearestOf.has(wanted)) return nearestOf.get(wanted);
+    trimmedNames ??= assets.map((asset) => ({ slug: asset.slug, name: trimmedName((asset.name ?? asset.slug).toLowerCase()) }));
+    let found: string | undefined;
+    let best = ASSET_MAX_DIFFERENCE + 1;
+    for (const { slug, name } of trimmedNames) {
+      // The distance is at least the difference in length, and only a smaller one than the best so far wins.
+      if (Math.abs(name.length - wanted.length) >= best) continue;
+      const distance = editDistance(wanted, name);
+      if (distance < best) {
+        best = distance;
+        found = slug;
+      }
+    }
+    nearestOf.set(wanted, found);
+    return found;
+  };
+  return (ref, macro) => {
     const trimmed = ref.trim();
     if (slugs.has(trimmed)) return trimmed;
     const lower = trimmed.toLowerCase();
@@ -2538,6 +2596,7 @@ export function assetResolver(assets: readonly NamedAsset[]): (ref: string) => s
     for (const folded of [foldSlug(trimmed), foldSlug(stem)]) {
       if (folded && slugs.has(folded)) return folded;
     }
-    return undefined;
+    // RisuAI's pattern takes no empty name, so an empty one never reaches its guess.
+    return trimmed && macro !== 'emotion' ? nearest(ref) : undefined;
   };
 }

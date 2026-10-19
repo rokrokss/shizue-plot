@@ -119,6 +119,13 @@ export { MAX_CARD_IMPORT_BYTES };
 export const MAX_IMPORT_FILE_NAME_LENGTH = 255;
 /** An uploaded asset's reference name (`name`), the one a pasted `{{img::name}}` is written in. */
 export const MAX_ASSET_NAME_LENGTH = 100;
+/**
+ * Asset rows per insert statement. PGlite 0.5.8 takes at most 32,767 parameters
+ * in one and, past that, says the insert went through and answers every later
+ * query of the connection with nothing (2026-10-19) — a card's 10,000 pictures
+ * are 60,000.
+ */
+const ASSET_INSERT_ROWS = 1_000;
 /** A module's name as the studio lists it — a label, as a member's roster name is. */
 export const MAX_MODULE_NAME_LENGTH = 100;
 
@@ -594,7 +601,9 @@ async function storeImportedAssets(
           mime: candidate.mime,
         };
       });
-      if (rows.length > 0) await tx.insert(plotAssets).values(rows);
+      for (let start = 0; start < rows.length; start += ASSET_INSERT_ROWS) {
+        await tx.insert(plotAssets).values(rows.slice(start, start + ASSET_INSERT_ROWS));
+      }
       emotions = fitting.flatMap((candidate, at) =>
         assets[candidate.index]!.emotion ? [{ name: candidate.name, slug: rows[at]!.slug }] : [],
       );

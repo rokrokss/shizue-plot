@@ -5,7 +5,7 @@ import { rgbaToThumbHash } from 'thumbhash';
 import type { ChatAttachment } from './types';
 
 /** Mirrors MAX_ASSETS_PER_PLOT in apps/api/src/assets.ts. */
-export const MAX_ASSETS = 1000;
+export const MAX_ASSETS = 10_000;
 /**
  * An upload's source reference name (`name`); mirrors MAX_ASSET_NAME_LENGTH in
  * apps/api/src/routes/plots.ts, which refuses a longer one rather than cutting it.

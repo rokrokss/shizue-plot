@@ -12,8 +12,14 @@ import type { Context } from 'hono';
 import { badRequest, notFound } from './errors.js';
 import { assetKey, byteRangeOf, type ObjectStorage } from './storage.js';
 
-/** Assets a single plot may hold. */
-export const MAX_ASSETS_PER_PLOT = 1000;
+/**
+ * Assets a single plot may hold — a guard against a hostile file's work, not a
+ * size a real card should meet: RisuAI keeps every picture a card carries, and a
+ * card may be 1GiB (`MAX_CARD_IMPORT_BYTES`), about 12,000 of the ~85KB pictures
+ * cards bring. It was 1000 until 2026-10-19, which cut a 1,417-picture card short
+ * and left the pictures its replies named blank.
+ */
+export const MAX_ASSETS_PER_PLOT = 10_000;
 /** `{{img::slug}}` only ever carries `[a-z0-9-_]{1,40}`. */
 const MAX_SLUG_LENGTH = 40;
 /** Past this the measurement is wrong, not the image. */

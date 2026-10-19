@@ -545,7 +545,7 @@ export function liftCompanion(
 }
 
 /** As many emotion pictures as a plot holds images (`MAX_ASSETS_PER_PLOT`). */
-const MAX_EMOTION_IMAGES = 1000;
+const MAX_EMOTION_IMAGES = 10_000;
 
 /**
  * The card's emotion pictures as the client sent them back: the import wrote

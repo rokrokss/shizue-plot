@@ -807,8 +807,37 @@ describe('assetResolver', () => {
     expect(resolve('Wet Coat 1')).toBe('wet-coat-1');
   });
 
-  it('names nothing it cannot find, rather than guessing at the nearest', () => {
-    expect(resolve('profil')).toBeUndefined();
+  it('names nothing farther than RisuAI guesses, and nothing for an empty reference', () => {
+    expect(resolve('thunderstorm')).toBeUndefined();
     expect(resolve('')).toBeUndefined();
+  });
+});
+
+describe('assetResolver, past the names written', () => {
+  const resolve = assetResolver([
+    { slug: 'daily-megumi-shocked', name: 'daily.megumi.shocked.webp' },
+    { slug: 'daily-megumi-smile', name: 'daily.megumi.smile.webp' },
+    { slug: 'kiss-a', name: 'kiss1' },
+    { slug: 'kiss-b', name: 'kiss2' },
+    { slug: 'uploaded', name: null },
+  ]);
+
+  it('takes the nearest name as RisuAI’s getClosestMatch does, its marks and extension set aside', () => {
+    // A reply that wrote the card's dots as underscores, as the owner's 메구미 chat did.
+    expect(resolve('daily_megumi_shocked')).toBe('daily-megumi-shocked');
+    expect(resolve('Daily-Megumi-Shoked.png')).toBe('daily-megumi-shocked');
+    // An upload goes by its slug.
+    expect(resolve('uplaoded')).toBe('uploaded');
+  });
+
+  it('gives a tie to the first asset, and nothing past four edits', () => {
+    expect(resolve('kiss3')).toBe('kiss-a');
+    // `happy` is five edits from `smile`.
+    expect(resolve('daily.megumi.happy')).toBeUndefined();
+  });
+
+  it('leaves `{{emotion::…}}` to the names as written, as RisuAI does', () => {
+    expect(resolve('daily_megumi_shocked', 'emotion')).toBeUndefined();
+    expect(resolve('daily.megumi.shocked', 'emotion')).toBe('daily-megumi-shocked');
   });
 });

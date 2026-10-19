@@ -110,7 +110,7 @@ const MIB = 1024 * 1024;
  *   (`kindOf`), so a declared length past it is refused before the body comes.
  * - 800 files and 128MB an import: that same sheet names 675 slices, ~34MB;
  *   the portraits a template asks for are a few hundred at most. The plot's
- *   own 1000-asset cap still holds over all of it.
+ *   own asset cap (`MAX_ASSETS_PER_PLOT`) still holds over all of it.
  * - 400 template guesses an import, 200 values a slot.
  * - 30s a request, 120s the whole fetch, 16 at a time, stylesheets first. The
  *   import is one HTTP request (the web's proxy waits 180s, next.config.ts).

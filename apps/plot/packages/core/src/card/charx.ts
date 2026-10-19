@@ -26,11 +26,12 @@ export const MAX_TOTAL_BYTES = MAX_CARD_IMPORT_BYTES;
  */
 export const MAX_ENTRY_BYTES = MAX_TOTAL_BYTES;
 /**
- * Embedded assets kept per archive — a parse budget, at the plot's 1000-asset
- * cap: Realm's popular cards carry a few hundred images, and one card is
- * allowed to fill a plot.
+ * Embedded assets kept per archive — a parse budget, at the plot's asset cap
+ * (`MAX_ASSETS_PER_PLOT` in the API): Realm's popular cards carry a few hundred
+ * images and the largest well over a thousand, and one card is allowed to fill
+ * a plot.
  */
-export const MAX_ASSETS = 1000;
+export const MAX_ASSETS = 10_000;
 /** Pictures, music, video and web fonts become the plot's assets; the declared type is not restricted. */
 export { IMAGE_EXTENSIONS };
 

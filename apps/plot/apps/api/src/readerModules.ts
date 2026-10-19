@@ -38,7 +38,7 @@ import { deleteQuietly, readerModuleAssetKey } from './storage.js';
 import { isUuid } from './util.js';
 
 /** Pictures one library module keeps at most — a work's cap (`MAX_ASSETS_PER_PLOT`). */
-export const MAX_READER_MODULE_ASSETS = 1000;
+export const MAX_READER_MODULE_ASSETS = 10_000;
 
 /** Same-origin path a library module's picture is served from; only its owner may read it. */
 export const readerModuleAssetUrl = (moduleId: string, assetId: string): string =>

@@ -9869,11 +9869,19 @@ describe('plot assets', () => {
     ]);
   });
 
+  /**
+   * Asset rows straight into the table, a thousand a statement: PGlite takes at
+   * most 32,767 parameters in one, and a plot's worth is more.
+   */
+  const seedAssets = async (rows: (typeof plotAssets.$inferInsert)[]): Promise<void> => {
+    for (let start = 0; start < rows.length; start += 1000) await db.insert(plotAssets).values(rows.slice(start, start + 1000));
+  };
+
   it(`caps a plot at ${MAX_ASSETS_PER_PLOT} assets while still allowing replacements`, async () => {
     const cookie = await signUp('asset-cap@example.com');
     const plot = await newPlot(cookie);
     // All but one straight into the table — the route only counts them.
-    await db.insert(plotAssets).values(
+    await seedAssets(
       Array.from({ length: MAX_ASSETS_PER_PLOT - 1 }, (_, i) => ({
         plotId: plot.id,
         slug: `a${i}`,
@@ -9980,9 +9988,11 @@ describe('plot assets', () => {
     expect(slugs.sort()).toEqual(
       Array.from({ length: CHARX_ASSET_BOUND }, (_, i) => `e${i}`).sort(),
     );
-    // A thousand pictures, each stored and recorded for the import to take back:
-    // a database round trip each, which through Docker on a Mac is a few ms.
-  }, 30_000);
+    // Ten thousand rows are 60,000 parameters, past the 32,767 PGlite takes in
+    // one statement: without the import's batches every query after the insert
+    // came back empty. Each picture is stored and recorded for the import to take
+    // back, a database round trip each — about 8s here.
+  }, 120_000);
 
   it('fits a member import into whatever room the plot has left', async () => {
     const cookie = await signUp('asset-member-import-cap@example.com');
@@ -9992,7 +10002,7 @@ describe('plot assets', () => {
     const plot = await newPlot(cookie);
 
     // Two slots left, one of them already holding the first slug the archive wants.
-    await db.insert(plotAssets).values([
+    await seedAssets([
       { plotId: plot.id, slug: 'e0', path: 'assets/taken.gif', mime: 'image/gif' },
       ...Array.from({ length: MAX_ASSETS_PER_PLOT - 3 }, (_, i) => ({
         plotId: plot.id,
@@ -10083,7 +10093,7 @@ describe('plot assets', () => {
     const cookie = await signUp('asset-race@example.com');
     const plot = await newPlot(cookie);
     // One short of the cap straight into the table — the route only counts them.
-    await db.insert(plotAssets).values(
+    await seedAssets(
       Array.from({ length: MAX_ASSETS_PER_PLOT - 1 }, (_, i) => ({
         plotId: plot.id,
         slug: `seed-${i}`,
