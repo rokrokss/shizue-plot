@@ -18,8 +18,9 @@ import { Checkbox, Select, TextArea, TextInput } from './ui';
  * preset, the modules on it and the members' cards declare (`text`, RisuAI's
  * syntax, read by `parseToggleSyntax`), drawn as RisuAI draws them — a
  * checkbox, a select, a text field or box, a caption, a divider, a group folded
- * under its title. A value is the reader's global variable `toggle_<key>` on
- * the work (`values`, as the chat reads them): a checkbox `'1'`/`'0'`, a select
+ * under its title. A value is the reader's global variable `toggle_<key>`,
+ * shared by every work as RisuAI's is (`values`, as the chat reads them — a
+ * work's own value of the name over the shared one): a checkbox `'1'`/`'0'`, a select
  * the chosen option's index, a field its text; unset reads as nothing. A field
  * is saved when it is left, as RisuAI saves it on change. Under them, RisuAI's
  * "Local Toggles" switch (`local`): while on, what is set here stays this

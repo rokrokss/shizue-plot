@@ -732,6 +732,19 @@ export const plotReaderVariables = pgTable('plot_reader_variables', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+// The toggles every work of the reader's shares — RisuAI's `globalChatVariables`
+// as its toggles sidebar writes them, one map for every character. Read under a
+// work's own global variables, so a work's own value of a name wins (values set
+// before toggles were shared, and what its scripts write). Capped by the API
+// (see `scriptState.ts`).
+export const readerToggles = pgTable('reader_toggles', {
+  userId: text('user_id')
+    .primaryKey()
+    .references(() => user.id, { onDelete: 'cascade' }),
+  variables: jsonb('variables').$type<Variables>().notNull().default({}),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 /**
  * Work a request handed off rather than did. A row is written inside the caller's
  * own transaction — that is the whole point of the queue living in Postgres: the

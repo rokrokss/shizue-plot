@@ -89,6 +89,7 @@ import {
   modelPresets,
   plots,
   plotAssets,
+  plotReaderVariables,
   readerModules,
   session,
   user,
@@ -15466,6 +15467,43 @@ describe('reader modules', () => {
     expect((await read(other))['toggle_umbrella']).toBe('1');
     const [row] = await db.select({ local: chats.localGlobalVariables }).from(chats).where(eq(chats.id, chatId));
     expect(row!.local).toBeNull();
+  });
+
+  it('shares a toggle across the reader’s works, as RisuAI’s one globalChatVariables, under a work’s own value', async () => {
+    const { app: capturing, prompts } = capturingApp();
+    const { cookie, chatId } = await workWithModule('reader-shared-toggles@example.com');
+    const secondWork = async (): Promise<string> => {
+      const plot = await createPlot(cookie, { description: '골짜기 {{getglobalvar::toggle_umbrella}}', intros: ['비가 온다.'] });
+      await addCharacter(cookie, plot.id, { name: '베라', card: { description: '기사.' } });
+      return (await startChat(cookie, plot.id)).chat.id;
+    };
+    const elsewhere = await secondWork();
+    const read = async (id: string): Promise<Record<string, string>> =>
+      (await readJson(await request(cookie, `/api/chats/${id}/global-variables`))).variables;
+    const toggle = async (id: string, value: string): Promise<Record<string, string>> =>
+      (await readJson(await json(cookie, `/api/chats/${id}/global-variables`, 'PATCH', { variables: { toggle_umbrella: value }, toggles: true }))).variables;
+
+    // Set on one work, it is on every other, and on a work made after.
+    expect((await toggle(chatId, '1'))['toggle_umbrella']).toBe('1');
+    expect((await read(elsewhere))['toggle_umbrella']).toBe('1');
+    const later = await secondWork();
+    expect((await readJson(await request(cookie, `/api/chats/${later}`))).globalVariables['toggle_umbrella']).toBe('1');
+    expect((await readSse(await json(cookie, `/api/chats/${later}/messages`, 'POST', { content: '안녕' }, capturing))).at(-1)!.event).toBe('done');
+    expect(prompts.at(-1)!.system).toContain('골짜기 1');
+
+    // A work's own value — one set before toggles were shared, or a script's — wins there alone.
+    await json(cookie, `/api/chats/${elsewhere}/global-variables`, 'PATCH', { variables: { toggle_umbrella: '0', seen: '3' } });
+    expect((await read(elsewhere))['toggle_umbrella']).toBe('0');
+    expect((await read(chatId))['toggle_umbrella']).toBe('1');
+    // Until the toggle is set there: then it is shared again, and the work's other globals stay.
+    expect((await toggle(elsewhere, '2'))).toMatchObject({ toggle_umbrella: '2', seen: '3' });
+    expect((await read(chatId))['toggle_umbrella']).toBe('2');
+    const [own] = await db
+      .select({ variables: plotReaderVariables.variables })
+      .from(plotReaderVariables)
+      .innerJoin(chats, eq(chats.plotId, plotReaderVariables.plotId))
+      .where(eq(chats.id, elsewhere));
+    expect(own!.variables).toEqual({ seen: '3' });
   });
 
   it('hides the senders’ icons where a module or the card says so, and keeps an MCP server or cjs code inert', async () => {

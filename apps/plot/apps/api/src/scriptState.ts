@@ -44,7 +44,7 @@ import {
   type ScriptChat,
   type ScriptOverlay,
 } from '@shizue/core/triggers';
-import { characters, chats, personas, plotReaderVariables, plots, type Chat } from '@shizue/db';
+import { characters, chats, personas, plotReaderVariables, plots, readerToggles, type Chat } from '@shizue/db';
 import { and, eq, sql } from 'drizzle-orm';
 import { coerceLorebook } from './card.js';
 import type { AppDeps, Tx } from './deps.js';
@@ -543,14 +543,33 @@ const globalVariablesLimit = (): ApiError =>
     `Global variables may hold at most ${MAX_GLOBAL_VARIABLE_KEYS} names and ${MAX_GLOBAL_VARIABLE_CHARS} characters`,
   );
 
-/** The work's global variables; empty until something set one. */
+/**
+ * The toggles every work of the owner's shares (`reader_toggles`): how many
+ * names, and how many characters in all. More names than a work's globals, as
+ * they gather the toggles of every preset and module the owner sets — the
+ * owner's "소악마" preset and module declare 157 between them.
+ */
+export const MAX_SHARED_TOGGLE_KEYS = 4_096;
+export const MAX_SHARED_TOGGLE_CHARS = 256_000;
+
+const SHARED_TOGGLE_LIMITS = { keys: MAX_SHARED_TOGGLE_KEYS, chars: MAX_SHARED_TOGGLE_CHARS };
+
+/**
+ * The work's global variables as its chats read them: its own values over the
+ * toggles all its owner's works share (`reader_toggles` — RisuAI keeps one
+ * `globalChatVariables` for every character), so a toggle set on one work shows
+ * on every other that holds no value of its own for the name. Empty until
+ * something set one.
+ */
 export async function loadGlobalVariables(deps: AppDeps, plotId: string): Promise<Variables> {
   const [row] = await deps.db
-    .select({ variables: plotReaderVariables.variables })
-    .from(plotReaderVariables)
-    .where(eq(plotReaderVariables.plotId, plotId))
+    .select({ own: plotReaderVariables.variables, shared: readerToggles.variables })
+    .from(plots)
+    .leftJoin(plotReaderVariables, eq(plotReaderVariables.plotId, plots.id))
+    .leftJoin(readerToggles, eq(readerToggles.userId, plots.ownerId))
+    .where(eq(plots.id, plotId))
     .limit(1);
-  return applyVariableDelta(row?.variables ?? {}, null);
+  return applyVariableDelta(row?.shared ?? {}, row?.own ?? null);
 }
 
 /**
@@ -581,9 +600,9 @@ export async function loadChatGlobalVariables(
 /**
  * A write of the chat's toggles — RisuAI's `setGlobalChatVar`, which only its
  * toggles sidebar calls: with the chat's "Local Toggles" on, into the chat's own
- * values; off, into the work's globals, the chat's own value of each name
- * written taken away first so the global one shows. Answers the globals as the
- * chat now reads them.
+ * values; off, into the toggles every work shares (`shareToggles`), the chat's
+ * own value of each name written taken away first so the shared one shows.
+ * Answers the globals as the chat now reads them.
  */
 export async function writeChatToggles(
   deps: AppDeps,
@@ -614,16 +633,61 @@ export async function writeChatToggles(
     await tx.update(chats).set({ localGlobalVariables: stored }).where(eq(chats.id, chat.id));
     return { localToggles: locked.localToggles, local: stored };
   });
-  const globals =
-    delta && !localToggles
-      ? await mergeGlobalVariables(deps, chat.plotId, delta)
-      : await loadGlobalVariables(deps, chat.plotId);
-  return withLocalGlobals(globals, local);
+  if (delta && !localToggles) await shareToggles(deps, chat.plotId, delta);
+  return withLocalGlobals(await loadGlobalVariables(deps, chat.plotId), local);
+}
+
+/**
+ * Merges a toggle write into the toggles the owner's works share — RisuAI's
+ * `globalChatVariables[key] = value` — and takes each name written out of the
+ * work's own globals, where a value set before toggles were shared would
+ * otherwise go on hiding it. Both rows are locked for the read-merge-write; the
+ * cap is a property of the merged map, checked under that lock.
+ */
+async function shareToggles(deps: AppDeps, plotId: string, delta: VariableDelta): Promise<void> {
+  await deps.db.transaction(async (tx) => {
+    const [plot] = await tx.select({ ownerId: plots.ownerId }).from(plots).where(eq(plots.id, plotId)).limit(1);
+    if (!plot) return;
+    await tx.insert(readerToggles).values({ userId: plot.ownerId }).onConflictDoNothing();
+    const shared = eq(readerToggles.userId, plot.ownerId);
+    const [row] = await tx
+      .select({ variables: readerToggles.variables })
+      .from(readerToggles)
+      .where(shared)
+      .for('update');
+    const merged = applyVariableDelta(row?.variables ?? {}, delta);
+    if (!checkVariableDelta(merged, SHARED_TOGGLE_LIMITS).ok) {
+      throw badRequest(
+        'global_variables_limit',
+        `Shared toggles may hold at most ${MAX_SHARED_TOGGLE_KEYS} names and ${MAX_SHARED_TOGGLE_CHARS} characters`,
+      );
+    }
+    await tx
+      .update(readerToggles)
+      .set({ variables: storableVariables(merged), updatedAt: new Date() })
+      .where(shared);
+
+    const work = eq(plotReaderVariables.plotId, plotId);
+    const [own] = await tx
+      .select({ variables: plotReaderVariables.variables })
+      .from(plotReaderVariables)
+      .where(work)
+      .for('update');
+    if (!own) return;
+    const cleared: VariableDelta = Object.create(null) as VariableDelta;
+    for (const key of Object.keys(delta)) if (Object.hasOwn(own.variables, key)) cleared[key] = null;
+    if (Object.keys(cleared).length === 0) return;
+    await tx
+      .update(plotReaderVariables)
+      .set({ variables: storableVariables(applyVariableDelta(own.variables, cleared)), updatedAt: new Date() })
+      .where(work);
+  });
 }
 
 /**
  * Merges `patch` into the work's global variables — a string sets, `null`
- * unsets — and answers with the whole map. The row is created on the first
+ * unsets — and answers with the whole map as the work reads it, the shared
+ * toggles under it (`loadGlobalVariables`). The row is created on the first
  * write and locked for the read-merge-write, so two writes at once each land on
  * top of the other rather than one undoing it; the cap is a property of the
  * merged map, checked under that lock.
@@ -634,7 +698,7 @@ export async function mergeGlobalVariables(deps: AppDeps, plotId: string, patch:
   const delta = check.delta;
   if (!delta) return loadGlobalVariables(deps, plotId);
 
-  return deps.db.transaction(async (tx) => {
+  await deps.db.transaction(async (tx) => {
     await tx.insert(plotReaderVariables).values({ plotId }).onConflictDoNothing();
     const where = eq(plotReaderVariables.plotId, plotId);
     const [row] = await tx
@@ -649,6 +713,6 @@ export async function mergeGlobalVariables(deps: AppDeps, plotId: string, patch:
       .update(plotReaderVariables)
       .set({ variables: storableVariables(merged), updatedAt: new Date() })
       .where(where);
-    return merged;
   });
+  return loadGlobalVariables(deps, plotId);
 }

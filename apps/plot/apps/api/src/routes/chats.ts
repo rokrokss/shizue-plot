@@ -458,8 +458,9 @@ async function chatState(deps: AppDeps, chat: Chat, window?: PathWindow, release
       ? { variableDefaults: await windowVariableDefaults(deps, chat, windowed.earlier) }
       : {}),
     /**
-     * The work's global variables, shared by all its chats and not by branch —
-     * what the card's scripts read as `getglobalvar`.
+     * The work's global variables, shared by all its chats and not by branch,
+     * over the toggles every work shares — what the card's scripts read as
+     * `getglobalvar`.
      */
     globalVariables: await loadChatGlobalVariables(deps, chat),
   };
@@ -2758,7 +2759,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       toggles: chatToggles(modules, members, await presetToggles(deps, chat)),
       /**
        * Whether RisuAI's sidebar draws its jailbreak toggle for this chat's preset
-       * (`presetHasJailbreak`); its value is a global of the work's, as a toggle's.
+       * (`presetHasJailbreak`); its value is kept as a toggle's, shared by every work.
        */
       jailbreak: presetHasJailbreak(readerPreset ?? getPreset(chat.preset)),
       /** RisuAI's `HideIconStore`: no message on this chat shows its sender's picture or name. */
@@ -2766,7 +2767,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     });
   });
 
-  /** The work's global variables (see `plotReaderVariables`). */
+  /** The work's global variables, the shared toggles under them (see `loadGlobalVariables`). */
   app.get('/:id/global-variables', async (c) => {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));
     return c.json({ variables: await loadChatGlobalVariables(deps, chat) });
@@ -2775,7 +2776,9 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
   /**
    * Merges into them: `{ variables: { name: value | null } }`, null unsetting, and
    * answers with the whole map. They are the work's rather than the chat's, so a
-   * chat an import is still filling may write them too.
+   * chat an import is still filling may write them too. With `toggles: true` it
+   * is the toggles sidebar writing, which lands in the shared toggles or, under
+   * "Local Toggles", in the chat (`writeChatToggles`).
    */
   app.patch('/:id/global-variables', async (c) => {
     const chat = await loadOwnedChat(deps, requireUuidParam(c), c.get('userId'));

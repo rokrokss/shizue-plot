@@ -2715,9 +2715,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   }
 
   /**
-   * One of the reader's global variables on the work — a toggle's value
-   * (`toggle_<key>`) — written at once, as RisuAI writes it (`setGlobalChatVar`:
-   * to this chat alone while its "Local Toggles" is on), and the page's copy
+   * One of the reader's global variables — a toggle's value (`toggle_<key>`),
+   * shared by every work — written at once, as RisuAI writes it
+   * (`setGlobalChatVar`: to this chat alone while its "Local Toggles" is on), and the page's copy
    * taken from the answer, which the scripts and the next prompt read.
    */
   async function setGlobalVariable(name: string, value: string): Promise<void> {

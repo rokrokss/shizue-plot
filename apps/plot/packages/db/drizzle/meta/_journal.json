@@ -22,6 +22,13 @@
       "when": 1792355669018,
       "tag": "0002_reader_preset_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1792376807356,
+      "tag": "0003_reader_toggles",
+      "breakpoints": true
     }
   ]
 }
