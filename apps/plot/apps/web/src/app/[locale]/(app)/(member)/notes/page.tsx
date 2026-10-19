@@ -76,7 +76,7 @@ export default function NotesPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-5 py-10">
+    <div className="mx-auto w-full max-w-6xl px-5 py-10">
       <div className="mb-6">
         <CreatorTabs />
       </div>
@@ -87,93 +87,99 @@ export default function NotesPage() {
         <ErrorText>{error}</ErrorText>
       </div>
 
-      <div className="mt-6 space-y-4">
-        <Section title={t('new')} busy={busy}>
-          <Field label={t('noteTitle')}>
-            <TextInput
-              value={title}
-              placeholder={t('noteTitlePlaceholder')}
-              onChange={(event) => setTitle(event.target.value)}
-            />
-          </Field>
-          <Field label={t('group')} hint={t('groupHint')}>
-            <TextInput
-              value={groupName}
-              placeholder={t('groupPlaceholder')}
-              onChange={(event) => setGroupName(event.target.value)}
-            />
-          </Field>
-          <Field label={t('content')}>
-            <TextArea
-              rows={4}
-              value={content}
-              maxLength={MAX_NOTE_LENGTH}
-              placeholder={t('contentPlaceholder')}
-              onChange={(event) => setContent(event.target.value)}
-            />
-          </Field>
-          <Button
-            variant="primary"
-            busy={busy}
-            disabled={!content.trim()}
-            onClick={() => void create()}
-          >
-            {t('create')}
-          </Button>
-        </Section>
+      {/* On a wide screen the form for a new one stands beside the list and stays
+          in view while it scrolls, so the page fills the width the tabs above
+          share with 내 플롯; a narrow one stacks them. */}
+      <div className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] lg:items-start lg:gap-6">
+        <div className="lg:sticky lg:top-20">
+          <Section title={t('new')} busy={busy}>
+            <Field label={t('noteTitle')}>
+              <TextInput
+                value={title}
+                placeholder={t('noteTitlePlaceholder')}
+                onChange={(event) => setTitle(event.target.value)}
+              />
+            </Field>
+            <Field label={t('group')} hint={t('groupHint')}>
+              <TextInput
+                value={groupName}
+                placeholder={t('groupPlaceholder')}
+                onChange={(event) => setGroupName(event.target.value)}
+              />
+            </Field>
+            <Field label={t('content')}>
+              <TextArea
+                rows={4}
+                value={content}
+                maxLength={MAX_NOTE_LENGTH}
+                placeholder={t('contentPlaceholder')}
+                onChange={(event) => setContent(event.target.value)}
+              />
+            </Field>
+            <Button
+              variant="primary"
+              busy={busy}
+              disabled={!content.trim()}
+              onClick={() => void create()}
+            >
+              {t('create')}
+            </Button>
+          </Section>
+        </div>
+        <div className="space-y-4">
+          {notes === null ? (
+            <div className="flex justify-center py-10">
+              <Spinner label={common('loading')} />
+            </div>
+          ) : notes.length === 0 ? (
+            <p className="py-6 text-center text-sm text-muted">{t('empty')}</p>
+          ) : (
+            groupNotes(notes).map((group) => (
+              <section key={group.name} className="space-y-3">
+                <button
+                  type="button"
+                  aria-expanded={!collapsed.includes(group.name)}
+                  disabled={group.notes.some((note) => savingIds.has(note.id) || deleting.has(note.id))}
+                  onClick={() =>
+                    setCollapsed((current) =>
+                      current.includes(group.name)
+                        ? current.filter((name) => name !== group.name)
+                        : [...current, group.name],
+                    )
+                  }
+                  className="flex w-full items-center gap-2 rounded-lg text-sm font-medium text-muted hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                >
+                  {/* `aria-expanded` already says which way it is turned. */}
+                  <span aria-hidden>{collapsed.includes(group.name) ? '▸' : '▾'}</span>
+                  <span>{group.name || t('ungrouped')}</span>
+                  <span className="text-xs text-muted/70">{group.notes.length}</span>
+                </button>
 
-        {notes === null ? (
-          <div className="flex justify-center py-10">
-            <Spinner label={common('loading')} />
-          </div>
-        ) : notes.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted">{t('empty')}</p>
-        ) : (
-          groupNotes(notes).map((group) => (
-            <section key={group.name} className="space-y-3">
-              <button
-                type="button"
-                aria-expanded={!collapsed.includes(group.name)}
-                disabled={group.notes.some((note) => savingIds.has(note.id) || deleting.has(note.id))}
-                onClick={() =>
-                  setCollapsed((current) =>
-                    current.includes(group.name)
-                      ? current.filter((name) => name !== group.name)
-                      : [...current, group.name],
-                  )
-                }
-                className="flex w-full items-center gap-2 rounded-lg text-sm font-medium text-muted hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-              >
-                {/* `aria-expanded` already says which way it is turned. */}
-                <span aria-hidden>{collapsed.includes(group.name) ? '▸' : '▾'}</span>
-                <span>{group.name || t('ungrouped')}</span>
-                <span className="text-xs text-muted/70">{group.notes.length}</span>
-              </button>
-
-              {collapsed.includes(group.name)
-                ? null
-                : group.notes.map((note) => (
-                    <NoteCard
-                      key={note.id}
-                      note={note}
-                      deleting={deleting.has(note.id)}
-                      onBusyChange={(pending) => setSavingIds((current) => {
-                        const next = new Set(current);
-                        if (pending) next.add(note.id); else next.delete(note.id);
-                        return next;
-                      })}
-                      onSaved={(saved) =>
-                        setNotes((current) =>
-                          (current ?? []).map((item) => (item.id === saved.id ? saved : item)),
-                        )
-                      }
-                      onDelete={() => void remove(note.id)}
-                      onError={setError}
-                    />
-                  ))}
-            </section>
-          ))
-        )}
+                {collapsed.includes(group.name)
+                  ? null
+                  : group.notes.map((note) => (
+                      <NoteCard
+                        key={note.id}
+                        note={note}
+                        deleting={deleting.has(note.id)}
+                        onBusyChange={(pending) => setSavingIds((current) => {
+                          const next = new Set(current);
+                          if (pending) next.add(note.id); else next.delete(note.id);
+                          return next;
+                        })}
+                        onSaved={(saved) =>
+                          setNotes((current) =>
+                            (current ?? []).map((item) => (item.id === saved.id ? saved : item)),
+                          )
+                        }
+                        onDelete={() => void remove(note.id)}
+                        onError={setError}
+                      />
+                    ))}
+              </section>
+            ))
+          )}
+        </div>
       </div>
     </div>
   );

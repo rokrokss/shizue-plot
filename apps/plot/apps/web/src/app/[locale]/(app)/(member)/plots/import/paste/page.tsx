@@ -34,66 +34,68 @@ export default function PasteMigrationPickerPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-5 py-10">
+    <div className="mx-auto w-full max-w-6xl px-5 py-10">
       <CreatorTabs />
 
-      <div className="mt-6">
-        <Link href="/plots" className="text-xs text-link underline underline-offset-2">
-          {t('back')}
-        </Link>
-        <h1 className="mt-2 title2 sm:title1">{t('title')}</h1>
-        <p className="mt-1 text-sm text-muted">{t('subtitle')}</p>
-      </div>
+      <div className="mx-auto max-w-3xl">
+        <div className="mt-6">
+          <Link href="/plots" className="text-xs text-link underline underline-offset-2">
+            {t('back')}
+          </Link>
+          <h1 className="mt-2 title2 sm:title1">{t('title')}</h1>
+          <p className="mt-1 text-sm text-muted">{t('subtitle')}</p>
+        </div>
 
-      <ul className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2" data-testid="migrate-sites">
-        {MIGRATION_PLATFORMS.map((platform) => {
-          const enabled = MIGRATION_PLATFORMS_ENABLED.includes(platform);
-          const hasDraft = enabled && saved.has(platform);
-          return (
-            <li
-              key={platform}
-              data-testid="migrate-site"
-              data-platform={platform}
-              aria-disabled={!enabled || undefined}
-              className={cx(
-                'flex flex-col gap-3 rounded-2xl border bg-surface p-5',
-                enabled ? 'border-line' : 'border-line/70 opacity-60',
-              )}
-            >
-              <div className="flex items-center gap-2">
-                <h2 className="heading2 text-fg">{t(`platforms.${platform}`)}</h2>
-                {!enabled ? <Badge>{t('comingSoon')}</Badge> : null}
-                {hasDraft ? <Badge tone="public">{t('savedDraft')}</Badge> : null}
-              </div>
-              <p className="text-sm text-muted">{t(`platformHints.${platform}`)}</p>
-              {enabled ? (
-                <div className="mt-auto flex flex-wrap items-center gap-2 pt-1">
-                  <Link
-                    href={`/plots/import/paste/${platform}`}
-                    data-testid={`migrate-open-${platform}`}
-                    className={buttonClass('primary', 'sm')}
-                  >
-                    {hasDraft ? t('continue') : t('start')}
-                  </Link>
-                  {hasDraft ? (
-                    <Button size="sm" variant="ghost" onClick={() => clear(platform)}>
-                      {t('clearSaved')}
-                    </Button>
-                  ) : null}
+        <ul className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2" data-testid="migrate-sites">
+          {MIGRATION_PLATFORMS.map((platform) => {
+            const enabled = MIGRATION_PLATFORMS_ENABLED.includes(platform);
+            const hasDraft = enabled && saved.has(platform);
+            return (
+              <li
+                key={platform}
+                data-testid="migrate-site"
+                data-platform={platform}
+                aria-disabled={!enabled || undefined}
+                className={cx(
+                  'flex flex-col gap-3 rounded-2xl border bg-surface p-5',
+                  enabled ? 'border-line' : 'border-line/70 opacity-60',
+                )}
+              >
+                <div className="flex items-center gap-2">
+                  <h2 className="heading2 text-fg">{t(`platforms.${platform}`)}</h2>
+                  {!enabled ? <Badge>{t('comingSoon')}</Badge> : null}
+                  {hasDraft ? <Badge tone="public">{t('savedDraft')}</Badge> : null}
                 </div>
-              ) : null}
-            </li>
-          );
-        })}
-      </ul>
+                <p className="text-sm text-muted">{t(`platformHints.${platform}`)}</p>
+                {enabled ? (
+                  <div className="mt-auto flex flex-wrap items-center gap-2 pt-1">
+                    <Link
+                      href={`/plots/import/paste/${platform}`}
+                      data-testid={`migrate-open-${platform}`}
+                      className={buttonClass('primary', 'sm')}
+                    >
+                      {hasDraft ? t('continue') : t('start')}
+                    </Link>
+                    {hasDraft ? (
+                      <Button size="sm" variant="ghost" onClick={() => clear(platform)}>
+                        {t('clearSaved')}
+                      </Button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
 
-      <p aria-live="polite" className="mt-3 text-xs text-muted">
-        {cleared ? t('savedCleared') : ''}
-      </p>
+        <p aria-live="polite" className="mt-3 text-xs text-muted">
+          {cleared ? t('savedCleared') : ''}
+        </p>
 
-      <p className="mt-3 rounded-xl border border-line bg-raised/50 px-4 py-3 text-xs leading-relaxed text-muted">
-        {t('privacy')}
-      </p>
+        <p className="mt-3 rounded-xl border border-line bg-raised/50 px-4 py-3 text-xs leading-relaxed text-muted">
+          {t('privacy')}
+        </p>
+      </div>
     </div>
   );
 }

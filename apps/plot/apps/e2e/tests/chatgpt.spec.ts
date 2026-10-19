@@ -33,7 +33,7 @@ test('connecting ChatGPT through Shizue, a callback error, and disconnecting', a
   // Consent, the extension's rewrite and the API's callback, as the one redirect they end in.
   await page.route('https://auth.openai.com/**', (route) => {
     connected = true;
-    return route.fulfill({ status: 302, headers: { location: `${WEB_URL}/ko/settings` } });
+    return route.fulfill({ status: 302, headers: { location: `${WEB_URL}/ko/settings/models` } });
   });
   await page.route('**/api/chatgpt/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -62,8 +62,8 @@ test('connecting ChatGPT through Shizue, a callback error, and disconnecting', a
   await page.goto('/ko/settings?error=chatgpt_login_declined');
   await expect(page.getByText('ChatGPT 연결을 허용하지 않았습니다.')).toBeVisible();
   await page.getByRole('button', CONNECT).click();
-  await expect(page).toHaveURL(/\/ko\/settings$/);
-  expect(signIn).toEqual({ next: '/settings', locale: 'ko' });
+  await expect(page).toHaveURL(/\/ko\/settings\/models$/);
+  expect(signIn).toEqual({ next: '/settings/models', locale: 'ko' });
 
   const disconnect = page.locator('section').getByRole('button', DISCONNECT);
   await expect(disconnect).toBeEnabled();
@@ -76,7 +76,7 @@ test('connecting ChatGPT through Shizue, a callback error, and disconnecting', a
   // Disconnected, the card offers the connection again, and the app stays where it was.
   await disconnect.click();
   await expect(page.getByRole('button', CONNECT)).toBeEnabled();
-  await expect(page).toHaveURL(/\/ko\/settings$/);
+  await expect(page).toHaveURL(/\/ko\/settings\/models$/);
 });
 
 test('a paired phone reads the connection, and connects nothing itself', async ({ page }) => {

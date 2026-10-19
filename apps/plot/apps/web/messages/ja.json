@@ -10,8 +10,26 @@
     "language": "言語",
     "theme": "テーマ",
     "chats": "チャット",
-    "menu": "メニュー",
-    "aiSettings": "AI 接続"
+    "settings": "設定"
+  },
+  "settings": {
+    "title": "設定",
+    "groups": {
+      "ai": "AI",
+      "app": "アプリ"
+    },
+    "items": {
+      "models": "モデルと接続",
+      "display": "表示",
+      "backup": "バックアップと復元",
+      "phoneAndBackup": "スマートフォンとバックアップ"
+    },
+    "hints": {
+      "models": "モデルプリセット、ChatGPT 接続、API キー",
+      "display": "言語とテーマ",
+      "backup": "アプリフォルダーのすべてを一つのファイルに",
+      "phoneAndBackup": "スマートフォンで開く、バックアップと復元"
+    }
   },
   "creatorTabs": {
     "plots": "マイプロット",

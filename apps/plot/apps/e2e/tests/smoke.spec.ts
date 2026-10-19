@@ -610,6 +610,9 @@ test('the open notes panel scrolls inside itself, never the page', async () => {
   await expect(composer).toBeInViewport({ ratio: 1 });
   expect(await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight)).toBeLessThanOrEqual(1);
   await composer.fill('');
+  // A click in the conversation below closes it, as a click outside a popup does.
+  await page.locator('[data-message-list]').click({ position: { x: 5, y: 5 } });
+  await expect(page.getByTestId('chat-panel')).toBeHidden();
 });
 
 test('attaches a saved note to the chat', async () => {
@@ -675,11 +678,11 @@ test('keeps following the conversation when what stands under it shrinks back', 
 });
 
 test('switches the UI locale to Japanese', async () => {
-  // A conversation has the whole screen, so the switch is the site header's.
-  await page.goto('/ko/plots');
+  // The language is one of 설정's, under 화면, with the theme.
+  await page.goto('/ko/settings/display');
   await page.getByLabel('언어').selectOption('ja');
 
-  await expect(page).toHaveURL(/\/ja\/plots$/);
+  await expect(page).toHaveURL(/\/ja\/settings\/display$/);
   await expect(
     page.getByRole('navigation').getByRole('link', { name: messages('ja').nav.create }),
   ).toBeVisible();

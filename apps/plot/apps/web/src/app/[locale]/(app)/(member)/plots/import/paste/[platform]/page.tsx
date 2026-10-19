@@ -250,142 +250,144 @@ function Wizard({ platform, schema }: { platform: MigrationPlatform; schema: Sit
   const previous = index > 0 && step !== 'run' ? WIZARD_STEPS[index - 1] : undefined;
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-5 py-10">
+    <div className="mx-auto w-full max-w-6xl px-5 py-10">
       <CreatorTabs />
 
-      <div className="mt-6">
-        <Link href="/plots/import/paste" className="text-xs text-link underline underline-offset-2">
-          {t('backToSites')}
-        </Link>
-        <h1 className="mt-2 title2 sm:title1">{t('wizardTitle', { platform: site })}</h1>
-        <p className="mt-1 text-sm text-muted">{t('wizardSubtitle')}</p>
-      </div>
+      <div className="mx-auto max-w-3xl">
+        <div className="mt-6">
+          <Link href="/plots/import/paste" className="text-xs text-link underline underline-offset-2">
+            {t('backToSites')}
+          </Link>
+          <h1 className="mt-2 title2 sm:title1">{t('wizardTitle', { platform: site })}</h1>
+          <p className="mt-1 text-sm text-muted">{t('wizardSubtitle')}</p>
+        </div>
 
-      <ol className="mt-6 flex flex-wrap gap-2" aria-label={t('stepsLabel')}>
-        {WIZARD_STEPS.map((each, at) => (
-          <li key={each}>
-            <button
-              type="button"
-              data-testid={`migrate-step-${each}`}
-              aria-current={each === step ? 'step' : undefined}
-              disabled={each === step || !reachable(each)}
-              onClick={() => setStep(each)}
-              className={cx(
-                'rounded-full border px-3 py-1 text-xs',
-                'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
-                each === step
-                  ? 'border-fg bg-mint-soft font-medium text-fg'
-                  : reachable(each)
-                    ? 'border-line text-muted hover:text-fg'
-                    : 'border-line text-muted/60',
-              )}
-            >
-              {at + 1}. {t(`steps.${each}`)}
-            </button>
-          </li>
-        ))}
-      </ol>
+        <ol className="mt-6 flex flex-wrap gap-2" aria-label={t('stepsLabel')}>
+          {WIZARD_STEPS.map((each, at) => (
+            <li key={each}>
+              <button
+                type="button"
+                data-testid={`migrate-step-${each}`}
+                aria-current={each === step ? 'step' : undefined}
+                disabled={each === step || !reachable(each)}
+                onClick={() => setStep(each)}
+                className={cx(
+                  'rounded-full border px-3 py-1 text-xs',
+                  'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
+                  each === step
+                    ? 'border-fg bg-mint-soft font-medium text-fg'
+                    : reachable(each)
+                      ? 'border-line text-muted hover:text-fg'
+                      : 'border-line text-muted/60',
+                )}
+              >
+                {at + 1}. {t(`steps.${each}`)}
+              </button>
+            </li>
+          ))}
+        </ol>
 
-      {restored && step !== 'run' ? (
-        <p className="mt-4 text-xs text-muted" data-testid="migrate-restored">
-          {lostImages && images.length === 0 ? t('restoredWithoutImages') : t('restored')}
-        </p>
-      ) : null}
-
-      <div className="mt-4">
-        {step === 'confirm' ? (
-          <ConfirmStep
-            platform={platform}
-            items={items}
-            checked={confirmations}
-            onCheck={(id, value) => setConfirmations((current) => ({ ...current, [id]: value }))}
-            sourceUrl={sourceUrl}
-            sourceUrlValid={sourceUrlValid}
-            onSourceUrl={setSourceUrl}
-          />
+        {restored && step !== 'run' ? (
+          <p className="mt-4 text-xs text-muted" data-testid="migrate-restored">
+            {lostImages && images.length === 0 ? t('restoredWithoutImages') : t('restored')}
+          </p>
         ) : null}
 
-        {step === 'form' ? (
-          <div className="space-y-4">
-            <p className="rounded-xl border border-line bg-raised/50 px-4 py-3 text-xs leading-relaxed text-muted">
-              {t('form.hint')}
-            </p>
-            <SiteForm schema={schema} input={input} warnings={result?.warnings ?? []} onChange={changeInput} />
+        <div className="mt-4">
+          {step === 'confirm' ? (
+            <ConfirmStep
+              platform={platform}
+              items={items}
+              checked={confirmations}
+              onCheck={(id, value) => setConfirmations((current) => ({ ...current, [id]: value }))}
+              sourceUrl={sourceUrl}
+              sourceUrlValid={sourceUrlValid}
+              onSourceUrl={setSourceUrl}
+            />
+          ) : null}
+
+          {step === 'form' ? (
+            <div className="space-y-4">
+              <p className="rounded-xl border border-line bg-raised/50 px-4 py-3 text-xs leading-relaxed text-muted">
+                {t('form.hint')}
+              </p>
+              <SiteForm schema={schema} input={input} warnings={result?.warnings ?? []} onChange={changeInput} />
+            </div>
+          ) : null}
+
+          {step === 'images' ? (
+            <ImagesStep
+              images={images}
+              urls={urls}
+              memberNames={result?.draft.members.map((member) => member.name) ?? []}
+              restoredWithoutImages={lostImages && images.length === 0}
+              onChange={(next) => {
+                setImages(next);
+                if (next.length > 0) setLostImages(false);
+              }}
+            />
+          ) : null}
+
+          {step === 'preview' && result ? (
+            <PreviewStep
+              platform={platform}
+              schema={schema}
+              result={result}
+              options={options}
+              onOptions={setOptions}
+              scenes={scenes}
+              avatars={avatars}
+              existing={existing}
+            />
+          ) : null}
+
+          {step === 'run' && run ? (
+            <RunStep
+              platform={platform}
+              schema={schema}
+              steps={run.steps}
+              state={run.state}
+              running={running}
+              result={run.result}
+              preservedText={preservedFile(run.result.preserved)}
+              savedLeft={savedLeft}
+              onRetry={() => void execute(run)}
+              onClearSaved={clearDraft}
+              onBack={() => {
+                setRun(null);
+                setStep('preview');
+              }}
+            />
+          ) : null}
+        </div>
+
+        {step !== 'run' ? (
+          <div className="mt-6 flex flex-wrap items-center justify-end gap-2">
+            {step === 'preview' && !canCreate ? (
+              <p className="mr-auto text-xs text-danger">{t('preview.cannotCreate')}</p>
+            ) : null}
+            {previous ? (
+              <Button data-testid="migrate-previous" onClick={() => setStep(previous)}>
+                {t('previous')}
+              </Button>
+            ) : null}
+            {step === 'preview' ? (
+              <Button variant="primary" data-testid="migrate-create" disabled={!canCreate} onClick={start}>
+                {t('preview.create')}
+              </Button>
+            ) : (
+              <Button
+                variant="primary"
+                data-testid="migrate-next"
+                disabled={!confirmed}
+                onClick={() => setStep(WIZARD_STEPS[index + 1]!)}
+              >
+                {t('next')}
+              </Button>
+            )}
           </div>
         ) : null}
-
-        {step === 'images' ? (
-          <ImagesStep
-            images={images}
-            urls={urls}
-            memberNames={result?.draft.members.map((member) => member.name) ?? []}
-            restoredWithoutImages={lostImages && images.length === 0}
-            onChange={(next) => {
-              setImages(next);
-              if (next.length > 0) setLostImages(false);
-            }}
-          />
-        ) : null}
-
-        {step === 'preview' && result ? (
-          <PreviewStep
-            platform={platform}
-            schema={schema}
-            result={result}
-            options={options}
-            onOptions={setOptions}
-            scenes={scenes}
-            avatars={avatars}
-            existing={existing}
-          />
-        ) : null}
-
-        {step === 'run' && run ? (
-          <RunStep
-            platform={platform}
-            schema={schema}
-            steps={run.steps}
-            state={run.state}
-            running={running}
-            result={run.result}
-            preservedText={preservedFile(run.result.preserved)}
-            savedLeft={savedLeft}
-            onRetry={() => void execute(run)}
-            onClearSaved={clearDraft}
-            onBack={() => {
-              setRun(null);
-              setStep('preview');
-            }}
-          />
-        ) : null}
       </div>
-
-      {step !== 'run' ? (
-        <div className="mt-6 flex flex-wrap items-center justify-end gap-2">
-          {step === 'preview' && !canCreate ? (
-            <p className="mr-auto text-xs text-danger">{t('preview.cannotCreate')}</p>
-          ) : null}
-          {previous ? (
-            <Button data-testid="migrate-previous" onClick={() => setStep(previous)}>
-              {t('previous')}
-            </Button>
-          ) : null}
-          {step === 'preview' ? (
-            <Button variant="primary" data-testid="migrate-create" disabled={!canCreate} onClick={start}>
-              {t('preview.create')}
-            </Button>
-          ) : (
-            <Button
-              variant="primary"
-              data-testid="migrate-next"
-              disabled={!confirmed}
-              onClick={() => setStep(WIZARD_STEPS[index + 1]!)}
-            >
-              {t('next')}
-            </Button>
-          )}
-        </div>
-      ) : null}
     </div>
   );
 }

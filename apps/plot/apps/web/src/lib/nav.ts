@@ -1,10 +1,11 @@
 /**
- * The shell's three clusters, described once for the header's bar and the phone's
+ * The shell's four clusters, described once for the header's bar and the phone's
  * tab bar both. A cluster is one destination plus every path that counts as
- * standing inside it — a work's page belongs to the library, and 페르소나 and
- * 노트 belong to 만들기 though they live behind its sub-tabs.
+ * standing inside it — a work's page belongs to the library, 페르소나 and 노트
+ * belong to 만들기 though they live behind its sub-tabs, and 설정 holds the
+ * models, the look and the backup.
  */
-export type NavKey = 'library' | 'chats' | 'create';
+export type NavKey = 'library' | 'chats' | 'create' | 'settings';
 
 export interface NavCluster {
   key: NavKey;
@@ -39,10 +40,7 @@ export function navClusters(pathname: string): NavCluster[] {
   return [
     { key: 'library', href: '/', active: pathname === '/' || under(pathname, '/p') },
     { key: 'chats', href: '/chats', active: under(pathname, '/chats') },
-    {
-      key: 'create',
-      href: '/plots',
-      active: under(pathname, '/plots', '/personas', '/notes'),
-    },
+    { key: 'create', href: '/plots', active: under(pathname, '/plots', '/personas', '/notes') },
+    { key: 'settings', href: '/settings', active: under(pathname, '/settings') },
   ];
 }

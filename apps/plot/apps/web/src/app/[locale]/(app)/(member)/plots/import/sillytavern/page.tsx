@@ -162,69 +162,71 @@ export default function SillyTavernImportPage() {
   const current = phase === 'scanning' ? 'choose' : phase;
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-5 py-10">
+    <div className="mx-auto w-full max-w-6xl px-5 py-10">
       <CreatorTabs />
 
-      <div className="mt-6">
-        <Link href="/plots" className="text-xs text-link underline underline-offset-2">
-          {t('back')}
-        </Link>
-        <h1 className="mt-2 title2 sm:title1">{t('title')}</h1>
-        <p className="mt-1 text-sm text-muted">{t('subtitle')}</p>
-      </div>
+      <div className="mx-auto max-w-3xl">
+        <div className="mt-6">
+          <Link href="/plots" className="text-xs text-link underline underline-offset-2">
+            {t('back')}
+          </Link>
+          <h1 className="mt-2 title2 sm:title1">{t('title')}</h1>
+          <p className="mt-1 text-sm text-muted">{t('subtitle')}</p>
+        </div>
 
-      <ol className="mt-6 flex flex-wrap gap-2" aria-label={t('stepsLabel')}>
-        {STEPS.map((step, index) => (
-          <li
-            key={step}
-            aria-current={step === current ? 'step' : undefined}
-            className={cx(
-              'rounded-full border px-3 py-1 text-xs',
-              step === current ? 'border-fg bg-mint-soft font-medium text-fg' : 'border-line text-muted',
-            )}
-          >
-            {index + 1}. {t(`steps.${step}`)}
-          </li>
-        ))}
-      </ol>
+        <ol className="mt-6 flex flex-wrap gap-2" aria-label={t('stepsLabel')}>
+          {STEPS.map((step, index) => (
+            <li
+              key={step}
+              aria-current={step === current ? 'step' : undefined}
+              className={cx(
+                'rounded-full border px-3 py-1 text-xs',
+                step === current ? 'border-fg bg-mint-soft font-medium text-fg' : 'border-line text-muted',
+              )}
+            >
+              {index + 1}. {t(`steps.${step}`)}
+            </li>
+          ))}
+        </ol>
 
-      <div className="mt-4">
-        <ErrorText>{error}</ErrorText>
-      </div>
+        <div className="mt-4">
+          <ErrorText>{error}</ErrorText>
+        </div>
 
-      <div className="mt-4">
-        {phase === 'choose' ? <SourcePicker onPick={(source) => void pick(source)} /> : null}
-        {phase === 'scanning' ? (
-          <ScanProgress
-            {...scan}
-            onCancel={() => {
-              abort.current?.abort();
-              setPhase('choose');
-            }}
-          />
-        ) : null}
-        {phase === 'review' && manifest && review && selection ? (
-          <ReviewPanel
-            manifest={manifest}
-            review={review}
-            selection={selection}
-            onSelection={setSelection}
-            options={options}
-            onOptions={setOptions}
-            steps={planned.length}
-            onStart={start}
-            onRestart={restart}
-          />
-        ) : null}
-        {phase === 'run' ? (
-          <RunPanel
-            steps={steps}
-            results={results}
-            running={running}
-            onCancel={() => abort.current?.abort()}
-            onRetry={() => void run(steps, results)}
-          />
-        ) : null}
+        <div className="mt-4">
+          {phase === 'choose' ? <SourcePicker onPick={(source) => void pick(source)} /> : null}
+          {phase === 'scanning' ? (
+            <ScanProgress
+              {...scan}
+              onCancel={() => {
+                abort.current?.abort();
+                setPhase('choose');
+              }}
+            />
+          ) : null}
+          {phase === 'review' && manifest && review && selection ? (
+            <ReviewPanel
+              manifest={manifest}
+              review={review}
+              selection={selection}
+              onSelection={setSelection}
+              options={options}
+              onOptions={setOptions}
+              steps={planned.length}
+              onStart={start}
+              onRestart={restart}
+            />
+          ) : null}
+          {phase === 'run' ? (
+            <RunPanel
+              steps={steps}
+              results={results}
+              running={running}
+              onCancel={() => abort.current?.abort()}
+              onRetry={() => void run(steps, results)}
+            />
+          ) : null}
+        </div>
       </div>
     </div>
   );

@@ -5,11 +5,21 @@ import { Link, usePathname } from '@/i18n/navigation';
 import { navClusters, type NavKey } from '@/lib/nav';
 import { Brand } from './Brand';
 import { Icon } from './Icon';
-import { LocaleSwitcher } from './LocaleSwitcher';
-import { ThemeSwitcher } from './ThemeSwitcher';
-import { buttonClass, cx } from './ui';
+import { cx } from './ui';
 
-function NavLink({ href, label, active, icon }: { href: string; label: string; active: boolean; icon: NavKey }) {
+function NavLink({
+  href,
+  label,
+  active,
+  icon,
+  className,
+}: {
+  href: string;
+  label: string;
+  active: boolean;
+  icon: NavKey;
+  className?: string | undefined;
+}) {
   return (
     <Link
       href={href}
@@ -18,6 +28,7 @@ function NavLink({ href, label, active, icon }: { href: string; label: string; a
         'inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
         'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
         active ? 'bg-mint-soft text-fg' : 'text-muted hover:bg-raised/60 hover:text-fg',
+        className,
       )}
     >
       <Icon name={icon} className="size-4" />
@@ -38,11 +49,12 @@ export function Header() {
           <Brand />
         </Link>
 
-        {/* Wide enough for the clusters and they stand in the bar. Narrower than
-            that they would push everything else off the screen, so the tab bar
-            at the bottom edge carries them instead — the same breakpoint the
-            chat's own header uses for its settings. */}
-        <nav className="hidden items-center gap-0.5 lg:flex">
+        {/* Wide enough for the clusters and they stand in the bar, 설정 at its far
+            end. Narrower than that they would push everything else off the
+            screen, so the tab bar at the bottom edge carries them instead — the
+            same breakpoint the chat's own header uses for its settings. The
+            language, the theme and the AI connection are all in 설정. */}
+        <nav className="hidden flex-1 items-center gap-0.5 lg:flex">
           {links.map((cluster) => (
             <NavLink
               key={cluster.key}
@@ -50,17 +62,10 @@ export function Header() {
               label={t(cluster.key)}
               icon={cluster.key}
               active={cluster.active}
+              className={cluster.key === 'settings' ? 'ml-auto' : undefined}
             />
           ))}
         </nav>
-
-        <div className="ml-auto flex items-center gap-2">
-          <Link href="/settings" className={buttonClass('secondary', 'sm')} aria-label={t('aiSettings')}>AI</Link>
-          <div className="hidden items-center gap-2 lg:flex">
-            <LocaleSwitcher />
-            <ThemeSwitcher />
-          </div>
-        </div>
       </div>
     </header>
   );

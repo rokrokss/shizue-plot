@@ -3080,9 +3080,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           It takes up to 70% of the screen, room for a module's long list of
           toggles, but always leaves 19rem for the header and the composer at its
           tallest (`max-h-48`), so nothing below it is pushed off the screen; on
-          a narrow screen the emotion band steps aside meanwhile. */}
+          a narrow screen the emotion band steps aside meanwhile. No line closes
+          it off: what scrolls under its lower edge fades out over the band's
+          own bottom padding, and the card's edge is the panel's edge once
+          scrolled to the end. A click in the conversation below closes it. */}
       {panelOpen ? (
-        <div className="max-h-[min(70dvh,calc(100dvh-19rem))] shrink-0 overflow-y-auto border-b border-line">
+        <div className="max-h-[min(70dvh,calc(100dvh-19rem))] shrink-0 overflow-y-auto [mask-image:linear-gradient(to_bottom,#000_calc(100%-1.25rem),transparent)]">
           <div className="mx-auto w-full max-w-[768px] px-2.5 py-5">
             <ChatPanel
               chatId={id}
@@ -3160,8 +3163,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
 
       {/* The chat area: the emotion screen, where the work's cards show one, and
           the column of the conversation and the composer. The screen is a band
-          above the column on a narrow screen and a column beside it on a wide one. */}
-      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+          above the column on a narrow screen and a column beside it on a wide one.
+          A click anywhere in it closes the notes panel above, as a click outside
+          a popup does, and still does what it was for: the conversation keeps
+          scrolling and the composer keeps taking words while the panel is open. */}
+      <div
+        className="flex min-h-0 flex-1 flex-col lg:flex-row"
+        {...(panelOpen ? { onClickCapture: () => setPanelOpen(false) } : {})}
+      >
         {emotionScreen.length > 0 ? (
           <EmotionScreen
             chatId={state.chat.id}

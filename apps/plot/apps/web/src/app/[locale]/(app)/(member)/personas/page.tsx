@@ -69,7 +69,7 @@ export default function PersonasPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-5 py-10">
+    <div className="mx-auto w-full max-w-6xl px-5 py-10">
       <div className="mb-6">
         <CreatorTabs />
       </div>
@@ -80,55 +80,61 @@ export default function PersonasPage() {
         <ErrorText>{error}</ErrorText>
       </div>
 
-      <div className="mt-6 space-y-4">
-        <Section title={t('new')} busy={busy}>
-          <Field label={t('name')}>
-            <TextInput
-              value={name}
-              placeholder={t('namePlaceholder')}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </Field>
-          <Field label={t('description')}>
-            <TextArea
-              rows={3}
-              value={description}
-              placeholder={t('descriptionPlaceholder')}
-              onChange={(event) => setDescription(event.target.value)}
-            />
-          </Field>
-          <Button
-            variant="primary"
-            busy={busy}
-            disabled={!name.trim()}
-            onClick={() => void create()}
-          >
-            {t('create')}
-          </Button>
-        </Section>
-
-        {personas === null ? (
-          <div className="flex justify-center py-10">
-            <Spinner label={common('loading')} />
-          </div>
-        ) : personas.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted">{t('empty')}</p>
-        ) : (
-          personas.map((persona) => (
-            <PersonaCard
-              key={persona.id}
-              persona={persona}
-              deleting={deleting.has(persona.id)}
-              onSaved={(saved) =>
-                setPersonas((current) =>
-                  (current ?? []).map((item) => (item.id === saved.id ? saved : item)),
-                )
-              }
-              onDelete={() => void remove(persona.id)}
-              onError={setError}
-            />
-          ))
-        )}
+      {/* On a wide screen the form for a new one stands beside the list and stays
+          in view while it scrolls, so the page fills the width the tabs above
+          share with 내 플롯; a narrow one stacks them. */}
+      <div className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] lg:items-start lg:gap-6">
+        <div className="lg:sticky lg:top-20">
+          <Section title={t('new')} busy={busy}>
+            <Field label={t('name')}>
+              <TextInput
+                value={name}
+                placeholder={t('namePlaceholder')}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </Field>
+            <Field label={t('description')}>
+              <TextArea
+                rows={3}
+                value={description}
+                placeholder={t('descriptionPlaceholder')}
+                onChange={(event) => setDescription(event.target.value)}
+              />
+            </Field>
+            <Button
+              variant="primary"
+              busy={busy}
+              disabled={!name.trim()}
+              onClick={() => void create()}
+            >
+              {t('create')}
+            </Button>
+          </Section>
+        </div>
+        <div className="space-y-4">
+          {personas === null ? (
+            <div className="flex justify-center py-10">
+              <Spinner label={common('loading')} />
+            </div>
+          ) : personas.length === 0 ? (
+            <p className="py-6 text-center text-sm text-muted">{t('empty')}</p>
+          ) : (
+            personas.map((persona) => (
+              <PersonaCard
+                key={persona.id}
+                persona={persona}
+                deleting={deleting.has(persona.id)}
+                onSaved={(saved) =>
+                  setPersonas((current) =>
+                    (current ?? []).map((item) => (item.id === saved.id ? saved : item)),
+                  )
+                }
+                onDelete={() => void remove(persona.id)}
+                onError={setError}
+              />
+            ))
+          )}
+        </div>
       </div>
     </div>
   );

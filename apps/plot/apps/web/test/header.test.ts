@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 /**
- * The header: the three clusters, AI settings and the pickers — the same for
- * everyone, since there is no sign-in. Which of them is visible at a
- * given width is a media query and so not testable here — what is testable is
- * that the wide-screen bar holds them and the narrow one hands them over.
+ * The header: the four clusters, 설정 last — the same for everyone, since there
+ * is no sign-in. Which of them is visible at a given width is a media query and
+ * so not testable here — what is testable is that the wide-screen bar holds
+ * them and the narrow one hands them over.
  *
  * `createElement` rather than JSX, matching bottomSheet.test.ts.
  */
@@ -54,16 +54,16 @@ const MESSAGES = {
   brand: { name: 'shizue' },
   common: { close: '닫기' },
   locales: { ko: '한국어', en: 'English', ja: '日本語' },
-  nav: { aiSettings: 'AI 연결',
+  nav: {
     library: '라이브러리',
     chats: '대화',
     create: '만들기',
     language: '언어',
-    menu: '메뉴',
+    settings: '설정',
   },
 };
 
-const CLUSTERS = ['라이브러리', '대화', '만들기'];
+const CLUSTERS = ['라이브러리', '대화', '만들기', '설정'];
 
 let host: HTMLElement;
 let root: Root;
@@ -86,6 +86,8 @@ const labels = (scope: HTMLElement): string[] =>
   [...scope.querySelectorAll('a')].map((node) => node.textContent ?? '');
 const linkTo = (href: string): HTMLAnchorElement | undefined =>
   [...bar().querySelectorAll('a')].find((node) => node.getAttribute('href') === href);
+const cluster = (label: string): HTMLAnchorElement =>
+  [...barNav().querySelectorAll('a')].find((node) => node.textContent === label)!;
 
 beforeEach(() => {
   pathname = '/chats';
@@ -101,7 +103,7 @@ afterEach(() => {
 });
 
 describe('Header', () => {
-  it('stands the three clusters in the bar for a wide screen', async () => {
+  it('stands the four clusters in the bar for a wide screen', async () => {
     await render();
 
     expect(labels(barNav())).toEqual(CLUSTERS);
@@ -109,24 +111,30 @@ describe('Header', () => {
     expect(barNav().className).toContain('hidden');
     expect(barNav().className).toContain('lg:flex');
     // The cluster we are standing in says so, not only the page we are on.
-    const here = [...barNav().querySelectorAll('a')].find((node) => node.textContent === '대화')!;
-    expect(here.getAttribute('aria-current')).toBe('page');
+    expect(cluster('대화').getAttribute('aria-current')).toBe('page');
   });
 
-  /** 페르소나 and 노트 live behind 만들기 now, and light it up from there. */
+  /** 페르소나 and 노트 live behind 만들기, and light it up from there. */
   it('marks 만들기 for the surfaces behind its sub-tabs', async () => {
     pathname = '/notes';
     await render();
 
-    const here = [...barNav().querySelectorAll('a')].find((node) => node.textContent === '만들기')!;
-    expect(here.getAttribute('aria-current')).toBe('page');
+    expect(cluster('만들기').getAttribute('aria-current')).toBe('page');
   });
 
-  it('offers AI settings and the locale, and no way in or out', async () => {
+  it('marks 설정 for its sections', async () => {
+    pathname = '/settings/display';
     await render();
 
-    expect(linkTo('/settings')?.textContent).toBe('AI');
-    expect(bar().querySelector('select[aria-label="언어"]')).not.toBeNull();
+    expect(cluster('설정').getAttribute('aria-current')).toBe('page');
+    expect(cluster('만들기').getAttribute('aria-current')).toBeNull();
+  });
+
+  it('leaves the AI connection and the pickers to 설정, and offers no way in or out', async () => {
+    await render();
+
+    expect(linkTo('/settings')?.textContent).toBe('설정');
+    expect(bar().querySelector('select')).toBeNull();
     expect(linkTo('/login')).toBeUndefined();
   });
 });
