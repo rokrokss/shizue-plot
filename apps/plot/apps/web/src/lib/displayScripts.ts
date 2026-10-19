@@ -184,10 +184,16 @@ export const MAX_PLAN_PIECES = 10_000;
  * How long the rewritten message may grow while the scripts run. Scripts chain,
  * so each one scans what the ones before it wrote, and a template is expanded
  * into the text before anything is rendered. Charged as each expansion is built.
- * Four times the longest message scanned, as a template that dresses every line
- * of it adds its markup to every line.
+ *
+ * A template is charged as it is written, before its `{{#when}}`s are read, and a
+ * card may carry its whole stylesheet in one: 스쿨잼 appends 449,000 characters
+ * of CSS and markup to the last message, 113,000 once read, and at 400,000, the
+ * cap until 2026-10-19, that message — the greeting, in a chat just begun — was
+ * drawn as prose. So the cap holds a card's stylesheet (`MAX_CREATOR_CSS_LENGTH`
+ * in `@shizue/core`, 1,500,000) with the longest message scanned beside it,
+ * dressed line by line.
  */
-export const MAX_WORKING_CHARS = 400_000;
+export const MAX_WORKING_CHARS = 2_000_000;
 /** Total sanitized HTML one message may produce. */
 export const MAX_HTML_CHARS = 400_000;
 /**
@@ -216,11 +222,12 @@ export const MAX_RENDER_INPUT_CHARS = 400_000;
  * What the CBS reads of one message may take on, every read together: the
  * message's own, each script's output read again before the next script, and
  * the islands' last read. Charged before each read — the template — and again for
- * what it produced, and for every variable the engine expands on the way. Four
- * times the sanitizer's allowance, since an island is read more than once; it is
- * paid in the worker, under the planner's deadline, not on the reader's thread.
+ * what it produced, and for every variable the engine expands on the way. The
+ * working text once, for a template read as it was written, and four times the
+ * sanitizer's allowance, since an island is read more than once; it is paid in
+ * the worker, under the planner's deadline, not on the reader's thread.
  */
-export const MAX_EVALUATED_CHARS = 4 * MAX_RENDER_INPUT_CHARS;
+export const MAX_EVALUATED_CHARS = MAX_WORKING_CHARS + 4 * MAX_RENDER_INPUT_CHARS;
 /**
  * Wall clock the matching may spend, checked between matches. The CBS reads in
  * between are not counted against it: they have their own budget, and both are

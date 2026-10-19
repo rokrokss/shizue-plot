@@ -183,9 +183,9 @@ export function escapeHtml(text: string): string {
 const MAX_RENDERED_NODES = 20_000;
 /**
  * A message's; the chat's background has its own (`MAX_BACKGROUND_RENDER_CHARS`,
- * `ChatBackground`). As long as the display pass's working text may grow
- * (`MAX_WORKING_CHARS`), since a read of a whole message or of a template that
- * wraps it all is one render.
+ * `ChatBackground`). As long as an island the sanitizer may take
+ * (`MAX_RENDER_INPUT_CHARS`), since a read of a whole message or of a template
+ * that wraps it all is one render, and what it makes is drawn as one island.
  */
 const MAX_RENDERED_CHARS = 400_000;
 /**

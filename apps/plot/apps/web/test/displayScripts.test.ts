@@ -581,6 +581,18 @@ describe('the render budget', () => {
     // The first script had already matched; nothing of it survives the abandon.
     expect(isPlain(segments, content)).toBe(true);
   });
+
+  it('draws a template far longer than what it reads down to', () => {
+    // 스쿨잼 appends 449,000 characters of stylesheet to the last message, 113,000
+    // once its `{{#when}}`s are read. The template is charged as it is written, and
+    // under a 400,000 cap the card's last message — its greeting, at first — was prose.
+    const unread = `{{#when::0}}<i>${'x'.repeat(450_000)}</i>{{/when}}`;
+    const segments = applyDisplayScripts(
+      'hp=1',
+      context([script({ in: 'hp=(\\d+)', out: `<b>HP $1</b>${unread}` })]),
+    );
+    expect(html(segments)).toEqual(['<b>HP 1</b>']);
+  });
 });
 
 describe('zero-length matches', () => {
