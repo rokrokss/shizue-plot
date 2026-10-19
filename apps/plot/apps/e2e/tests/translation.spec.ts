@@ -230,7 +230,7 @@ test('reads at a phone width, in both themes', async () => {
     await Promise.all([settingsWrite(), mode.selectOption('translate')]);
 
     // The author's note, with where and how often it goes.
-    await sheet.getByRole('button', { name: '노트', exact: true }).click();
+    await sheet.getByRole('button', { name: '노트 / 모듈', exact: true }).click();
     const settings = page.getByTestId('author-note-settings');
     await settings.scrollIntoViewIfNeeded();
     await page.screenshot({ path: `test-results/translation/author-note-${scheme}.png` });

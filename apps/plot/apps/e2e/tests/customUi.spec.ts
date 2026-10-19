@@ -41,7 +41,7 @@ const assistantMessages = () => page.getByTestId('message-assistant');
 async function openPanel(): Promise<void> {
   if (!(await page.getByTestId('chat-panel').isVisible())) {
     await page.getByRole('button', { name: '대화 설정' }).click();
-    await page.getByRole('dialog', { name: '대화 설정' }).getByRole('button', { name: '노트', exact: true }).click();
+    await page.getByRole('dialog', { name: '대화 설정' }).getByRole('button', { name: '노트 / 모듈', exact: true }).click();
   }
   await expect(page.getByTestId('chat-panel')).toBeVisible();
 }

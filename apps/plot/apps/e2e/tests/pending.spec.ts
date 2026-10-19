@@ -47,7 +47,7 @@ test('chat settings lock their snapshot without discarding the next message draf
   const state = await chatResponse.json();
   await page.goto(`/ko/chats/${state.chat.id}`);
   await page.getByRole('button', { name: '대화 설정' }).click();
-  await page.getByRole('dialog', { name: '대화 설정' }).getByRole('button', { name: '노트', exact: true }).click();
+  await page.getByRole('dialog', { name: '대화 설정' }).getByRole('button', { name: '노트 / 모듈', exact: true }).click();
   const panel = page.getByTestId('chat-panel');
   const note = panel.locator('textarea').first();
   await note.fill('저장할 대화 설정');

@@ -1,6 +1,6 @@
 {
   "name": "shizue-plot",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A character-chat app you run on your own computer: RisuAI and SillyTavern cards, played on your ChatGPT plan or your own API keys.",
   "license": "GPL-3.0-only",
   "//repository": "The package's README is the repository's, so npm resolves its relative images and links against the repository root.",

@@ -232,7 +232,7 @@ async function click(node: Element): Promise<void> {
 /** The notes panel, which the sheet ☰ opens has the way into. */
 async function openNotes(): Promise<void> {
   await click(button('대화 설정')!);
-  await click(button('노트')!);
+  await click(button('노트 / 모듈')!);
 }
 
 /** Lets the round's chain of requests run on, as far as nothing holds it. */

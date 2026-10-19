@@ -45,7 +45,7 @@ async function expectComposerIdle(): Promise<void> {
 /** The notes panel, opened from the settings sheet ☰ opens. */
 async function openPanel(): Promise<void> {
   await page.getByRole('button', { name: '대화 설정' }).click();
-  await page.getByRole('dialog', { name: '대화 설정' }).getByRole('button', { name: '노트', exact: true }).click();
+  await page.getByRole('dialog', { name: '대화 설정' }).getByRole('button', { name: '노트 / 모듈', exact: true }).click();
   await expect(page.getByTestId('chat-panel')).toBeVisible();
 }
 

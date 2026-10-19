@@ -90,7 +90,7 @@ async function openSettings() {
 /** The notes panel, opened from the settings sheet when it is not already showing. */
 async function openPanel(): Promise<void> {
   if (!(await page.getByTestId('chat-panel').isVisible())) {
-    await (await openSettings()).getByRole('button', { name: '노트', exact: true }).click();
+    await (await openSettings()).getByRole('button', { name: '노트 / 모듈', exact: true }).click();
   }
   await expect(page.getByTestId('chat-panel')).toBeVisible();
 }
