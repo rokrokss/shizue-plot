@@ -13,7 +13,10 @@ import type { ChatListItem, Plot } from '@/lib/types';
 import { useDocumentTitle } from '@/lib/useDocumentTitle';
 import { useErrorMessage } from '@/lib/useErrorMessage';
 
-/** How many of the latest conversations the library shows before 모든 대화. */
+/**
+ * How many of the latest conversations the library shows before 모든 대화 on a
+ * wide screen; a narrow one, where the tab bar stands, shows the first three.
+ */
 const RECENT_CHATS = 4;
 
 /**
@@ -68,7 +71,7 @@ export default function LibraryPage() {
             <h2 className="heading1">{t('recentChats')}</h2>
             <Link href="/chats" className="text-sm text-muted transition-colors hover:text-fg">{t('allChats')}</Link>
           </div>
-          <div className="mt-4">
+          <div className="mt-4 max-lg:[&>ul>li:nth-child(3)]:mb-0 max-lg:[&>ul>li:nth-child(n+4)]:hidden">
             <ChatRows chats={chats.slice(0, RECENT_CHATS)} now={now} />
           </div>
         </section>

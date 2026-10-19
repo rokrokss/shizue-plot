@@ -1520,7 +1520,7 @@ DELETE /api/chats/:id/memory/facts/:fid 사실 지우기 → 204
 
 | 경로 | 내용 |
 |---|---|
-| `/{locale}` | **라이브러리**: 최근 대화 넷(`ChatRows`, "모든 대화"로 `/chats`)과 내 작품(`PlotShelf` — 카드는 작품 페이지로 간다, "작품 관리"로 `/plots`). 작품이 없으면 만들기로 가는 빈 상태. 읽는 것은 `GET /api/chats`와 `GET /api/plots` 둘이다 |
+| `/{locale}` | **라이브러리**: 최근 대화 넷(좁은 화면(`lg` 미만)에서는 셋 — 2026-10-19 소유자 요청, `ChatRows`, "모든 대화"로 `/chats`)과 내 작품(`PlotShelf` — 카드는 작품 페이지로 간다, "작품 관리"로 `/plots`). 작품이 없으면 만들기로 가는 빈 상태. 읽는 것은 `GET /api/chats`와 `GET /api/plots` 둘이다 |
 | `/{locale}/plots` | 내 플롯 그리드 + 새 플롯 / AI로 초안 만들기 / 카드 임포트(png·json·charx·jpg(charx)) / RisuRealm에서 가져오기 / SillyTavern에서 이사오기 / 다른 플랫폼에서 옮기기 — 제작 영역(플롯/페르소나/노트 서브탭) |
 | `/{locale}/plots/import/sillytavern` | **SillyTavern 이사 마법사** — 백업 zip 또는 폴더 → 확인 → 가져오기(아래) |
 | `/{locale}/plots/import/paste` | **붙여넣기 이주 사이트 고르기** — 다섯 사이트 카드(열린 것만 시작, 나머지 "준비 중"), 사이트별 저장본 표시·지우기(아래) |
