@@ -44,6 +44,8 @@ const REPLY = [
   '',
   '그녀는 컵을 내려놓으며 §딸깍§ 웃었다.',
   '',
+  '리아가 「어서」라고 작게 중얼거렸다.',
+  '',
   "'오늘은 좀 늦었네.'",
 ].join('\n');
 
@@ -204,6 +206,17 @@ test('the 소악마 preset and module draw a Gemini reply as RisuAI draws it', a
     await expect(reply.locator('.x-shizue-regex-thought-block')).toContainText('오늘은 좀 늦었네.');
     await expect(reply.locator('.x-shizue-ts-badge')).toContainText('18:40');
     await expect(reply.locator('.x-shizue-regex-sound-block')).toContainText('딸깍');
+    // The sound chip is a `<div>` the module puts between blank lines, and RisuAI's
+    // markdown draws it as a block of its own between the line's two paragraphs:
+    // here it stands outside the bubbles, between the two halves of the line.
+    await expect(reply.locator('.chat-bubble .x-shizue-regex-sound-block')).toHaveCount(0);
+    await expect(reply.locator('.chat-bubble', { hasText: '그녀는 컵을 내려놓으며' })).not.toContainText('웃었다.');
+    // The 「…」 a script colours is a `<span>`, a run of its line in RisuAI's
+    // paragraph: here it stays in that line, in the line's bubble.
+    const line = reply.locator('.chat-bubble p', { hasText: '「어서」' });
+    const word = line.locator('span', { hasText: '「어서」' });
+    await expect(word).toHaveCSS('color', 'rgb(255, 179, 102)');
+    await expect(line).toHaveText(/^리아가 「어서」\u200b?라고 작게 중얼거렸다\.$/);
     const turn = page.getByTestId('message-user').last();
     // The `<Thoughts>` the module opens on every message is never closed in a turn, and draws nothing.
     await expect(turn.locator('.message-body')).toHaveText(/^\s*안녕\s*$/);

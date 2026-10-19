@@ -240,6 +240,36 @@ function inlineMarkup(markup: string): boolean {
 }
 
 /**
+ * A plan with the islands that only dress words put back into the prose around
+ * them, as RisuAI's markdown reads a script's `<span>` as a run of the
+ * paragraph it stands in rather than a block of its own: the island's markup
+ * (before the sanitizer, its marks on, so a link built of the model's words is
+ * still the model's) joins the text runs beside it, and the line that holds it
+ * is then a block of the message's own HTML — the same markdown, the same
+ * sanitizer and the same reading of the marks, drawn in that line's bubble or
+ * narration. The break RisuAI writes after a template that ends in `>` comes
+ * along, and is the `<br>` it is there. An island that lays out a box (a
+ * `<div>`, a `<details>`, a table) or carries no tag at all stays an island:
+ * the first stands on its own as it does in RisuAI's markdown, between its
+ * paragraphs; the second has no markup to read its marks by.
+ */
+function withInlineIslands(plan: DisplayPlan): DisplayPlan {
+  if (!plan.body.some((segment) => segment.kind === 'html' && dressesWords(segment.html))) return plan;
+  const body: Segment[] = [];
+  for (const segment of plan.body) {
+    const text = segment.kind === 'text' ? segment.text : dressesWords(segment.html) ? segment.html : null;
+    const last = body.at(-1);
+    if (text === null) body.push(segment);
+    else if (last?.kind === 'text') body[body.length - 1] = { kind: 'text', text: last.text + text };
+    else body.push({ kind: 'text', text });
+  }
+  return { ...plan, body };
+}
+
+/** Markup with a tag in it, every one of them words in a colour or a weight (`inlineMarkup`). */
+const dressesWords = (markup: string): boolean => /<\/?[A-Za-z]/.test(markup) && inlineMarkup(markup);
+
+/**
  * A run's blocks, with the lines that stand outside a bubble taken out of them:
  * a picture alone on its line, and — in a narration or an intro — a `#`/`##`
  * title. A fenced block is left whole, and so is everything else: a picture
@@ -653,7 +683,7 @@ export const MessageBody = memo(function MessageBody({
     // sanitizing, done here, where there is a DOM. An island the sanitizer
     // leaves nothing of — the `<Thoughts>` a module puts before a turn it never
     // closes — draws nothing, rather than an empty box.
-    const rendered = plan ? renderDisplayPlan(plan, (html) => renderIsland(html, labels)) : null;
+    const rendered = plan ? renderDisplayPlan(withInlineIslands(plan), (html) => renderIsland(html, labels)) : null;
     const base = rendered ? rendered.filter((segment) => segment.kind !== 'html' || segment.html.trim() !== '') : plain;
     if (componentContext) return splitComponentCalls(base, componentContext.names);
     return componentNames ? escapeComponentCalls(base, componentNames) : base;

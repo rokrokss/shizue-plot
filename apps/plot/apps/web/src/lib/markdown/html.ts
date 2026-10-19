@@ -424,8 +424,19 @@ function renderTree(md: string, write: (tree: HastNode) => string): string {
   return html;
 }
 
-/** Markdown with raw HTML enabled, as an unsanitized string (`renderTree`). */
-export const markdownToHtml = (md: string): string => withSheetsKept(md, (text) => renderTree(text, toHtml));
+/**
+ * Markdown with raw HTML enabled, as an unsanitized string (`renderTree`). The
+ * marks a link markdown builds lost to its percent-encoding are put back
+ * (`restoreMarks`), as an island's are: a script's `<span>` read as part of its
+ * line comes this way (`MessageBody`'s `withInlineIslands`).
+ */
+export const markdownToHtml = (md: string): string =>
+  withSheetsKept(md, (text) =>
+    renderTree(text, (tree) => {
+      restoreMarks(tree);
+      return toHtml(tree);
+    }),
+  );
 
 /**
  * A markup chunk as it may reach the DOM: rendered, then sanitized like any

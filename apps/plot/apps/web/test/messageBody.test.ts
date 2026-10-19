@@ -372,7 +372,41 @@ describe('RisuAI’s markdown over what the scripts made', () => {
     await land(planWith(content, scripts));
     const quote = host.querySelector('.x-shizue-q')!;
     expect(quote.closest('.chat-bubble')).not.toBeNull();
-    expect(quote.closest('p')).toBeNull();
+    // A run of its line, as RisuAI's markdown reads a `<span>`: in the line's
+    // paragraph, with the break RisuAI writes after a template that ends in `>`.
+    const line = quote.closest('p')!;
+    expect(line.textContent!.replace(/\s+/g, ' ')).toBe('아리아는 "안녕" 하고 웃었다.');
+    expect(quote.nextElementSibling?.tagName).toBe('BR');
+    expect(host.querySelectorAll('.chat-bubble')).toHaveLength(1);
+  });
+
+  it('keeps a word a script dresses inside its line, in one bubble, where the script says <no_end_nl>', async () => {
+    // The 소악마 module's 「…」, a sentence's word in a colour.
+    const scripts: DisplayScript[] = [
+      { in: '「([^」]+?)」', out: '<span class="s">「$1」</span>', order: 0, enabled: true, noEndNl: true },
+    ];
+    const content = '리아가 「어서」라고 작게 중얼거렸다.\n\n그리고 웃었다.';
+    render(createElement(MessageBody, { content, display: display({ scripts }), roster: ROSTER, speaker: '아리아', mode: 'reply' }));
+    await land(planWith(content, scripts));
+    const word = host.querySelector('.x-shizue-s')!;
+    expect(word.closest('p')!.textContent).toBe('리아가 「어서」라고 작게 중얼거렸다.');
+    expect(word.nextElementSibling).toBeNull();
+    // The line and the prose after it stay one speaker's one bubble.
+    expect(host.querySelectorAll('.chat-bubble')).toHaveLength(1);
+    expect(host.querySelector('.chat-bubble')!.textContent).toContain('그리고 웃었다.');
+  });
+
+  it('still stands a box a script lays out apart from the prose around it, as RisuAI’s markdown does', async () => {
+    // The 소악마 module's sound chip: a `<div>` between blank lines, its own block there too.
+    const scripts: DisplayScript[] = [
+      { in: '§([^§]+)§', out: '\n\n<div class="sound">$1</div>\n\n', order: 0, enabled: true },
+    ];
+    const content = '컵을 내려놓으며 §딸깍§ 웃었다.';
+    render(createElement(MessageBody, { content, display: display({ scripts }), roster: ROSTER, speaker: '아리아', mode: 'reply' }));
+    await land(planWith(content, scripts));
+    const chip = host.querySelector('.x-shizue-sound')!;
+    expect(chip.closest('.chat-bubble')).toBeNull();
+    expect([...host.querySelectorAll('.chat-bubble')].map((bubble) => bubble.textContent!.trim())).toEqual(['컵을 내려놓으며', '웃었다.']);
   });
 });
 

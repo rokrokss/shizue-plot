@@ -24,7 +24,7 @@ import {
 } from '@shizue/core';
 import { renderProse, type CbsContext } from '../src/lib/cbs';
 import { PLAN_LIMITS, renderDisplayPlan, transformDisplay, type DisplayPlan } from '../src/lib/displayScripts';
-import { renderIsland } from '../src/lib/markdown/html';
+import { markdownToHtml, renderIsland } from '../src/lib/markdown/html';
 import { parseThoughtsAndTools } from '../src/lib/markdown/thoughts';
 import { stripTaint } from '../src/lib/taint';
 import type { DisplayScript } from '../src/lib/types';
@@ -106,8 +106,18 @@ const REPLY = [
   '',
   '그녀는 컵을 내려놓으며 §딸깍§ 웃었다.',
   '',
+  '리아가 「어서」라고 작게 중얼거렸다.',
+  '',
   "'오늘은 좀 늦었네.'",
 ].join('\n');
+
+/** The top-level blocks RisuAI's markdown makes of a text, as `tag.class: text`. */
+function blocksOf(text: string): string[] {
+  const doc = new DOMParser().parseFromString(`<body>${markdownToHtml(text)}</body>`, 'text/html');
+  return [...doc.body.children]
+    .filter((element) => element.textContent!.trim() !== '')
+    .map((element) => `${element.tagName.toLowerCase()}${element.className ? `.${element.className}` : ''}: ${element.textContent!.trim()}`);
+}
 
 describe.skipIf(!present)('the 소악마 preset and module, against RisuAI', () => {
   it('imports the scripts the files carry', () => {
@@ -130,6 +140,20 @@ describe.skipIf(!present)('the 소악마 preset and module, against RisuAI', () 
     expect(text).toContain('<div class="regex-quote-block">"어, 왔어?');
     expect(text).toContain('<div class="ts-divider">');
     expect(text).toContain('regex-sound-block');
+  });
+
+  it('lays the sound chip out as a block and the coloured word inside its line, as RisuAI’s markdown does', () => {
+    const ctx = contextOf();
+    const blocks = blocksOf(risu(REPLY, ctx));
+    // The chip is a `<div>` between blank lines: its own block between the line's two halves.
+    const chip = blocks.findIndex((block) => block.startsWith('div.regex-sound-block'));
+    expect(blocks.slice(chip - 1, chip + 2)).toEqual(['p: 그녀는 컵을 내려놓으며', 'div.regex-sound-block: 딸깍', 'p: 웃었다.']);
+    // The 「…」 is a `<span>` run of its paragraph.
+    expect(blocks).toContain('p: 리아가 「어서」\u200b라고 작게 중얼거렸다.');
+    // Ours made the same two islands: the chip a box, the word a span the page keeps in its line.
+    const islands = planOf(REPLY, ctx).body.flatMap((segment) => (segment.kind === 'html' ? [stripTaint(segment.html)] : []));
+    expect(islands.some((island) => island.includes('<div class="regex-sound-block">'))).toBe(true);
+    expect(islands).toContain('<span style="color: #FFB366; ">「어서」</span>&ZeroWidthSpace;');
   });
 
   it('folds the reasoning as RisuAI does once 🗯추론확인 할래 is on', () => {
@@ -263,6 +287,16 @@ describe('each rule of RisuAI’s display pass', () => {
     expect(ours).toBe(risuProcessScriptFull([...presetRaw, ...moduleRaw], 'ab', 'editdisplay', parserOf(ctx), 1));
     // The module's `<order 2>` first, the preset's own first script next, its `<order -1>` last — over what the others wrote.
     expect(ours).toBe('[preset:a][module first:[preset late:b]]');
+  });
+
+  it('reads a script’s span as a run of its line and a box between blank lines as a block of its own', () => {
+    const span = bothWays([risuScript({ in: '「([^」]+)」', out: '<span class="s">「$1」</span>' })], '그가 「어서」라고 했다.');
+    expect(span.ours).toBe(span.risu);
+    // The `>` that ends it writes a break, which markdown makes a `<br>` in the same paragraph.
+    expect(blocksOf(span.risu)).toEqual(['p: 그가 「어서」\n라고 했다.']);
+    const box = bothWays([risuScript({ in: '§([^§]+)§', out: '\n\n<div class="sound">$1</div>\n\n' })], '내려놓으며 §딸깍§ 웃었다.');
+    expect(box.ours).toBe(box.risu);
+    expect(blocksOf(box.risu)).toEqual(['p: 내려놓으며', 'div.sound: 딸깍', 'p: 웃었다.']);
   });
 
   it('folds a <Thoughts> the model closed, in prose or in a script’s block, and leaves an open one', () => {
