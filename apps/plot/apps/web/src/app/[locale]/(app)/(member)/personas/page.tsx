@@ -80,61 +80,58 @@ export default function PersonasPage() {
         <ErrorText>{error}</ErrorText>
       </div>
 
-      {/* On a wide screen the form for a new one stands beside the list and stays
-          in view while it scrolls, so the page fills the width the tabs above
-          share with 내 플롯; a narrow one stacks them. */}
-      <div className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] lg:items-start lg:gap-6">
-        <div className="lg:sticky lg:top-20">
-          <Section title={t('new')} busy={busy}>
-            <Field label={t('name')}>
-              <TextInput
-                value={name}
-                placeholder={t('namePlaceholder')}
-                onChange={(event) => setName(event.target.value)}
-              />
-            </Field>
-            <Field label={t('description')}>
-              <TextArea
-                rows={3}
-                value={description}
-                placeholder={t('descriptionPlaceholder')}
-                onChange={(event) => setDescription(event.target.value)}
-              />
-            </Field>
-            <Button
-              variant="primary"
-              busy={busy}
-              disabled={!name.trim()}
-              onClick={() => void create()}
-            >
-              {t('create')}
-            </Button>
-          </Section>
-        </div>
-        <div className="space-y-4">
-          {personas === null ? (
-            <div className="flex justify-center py-10">
-              <Spinner label={common('loading')} />
-            </div>
-          ) : personas.length === 0 ? (
-            <p className="py-6 text-center text-sm text-muted">{t('empty')}</p>
-          ) : (
-            personas.map((persona) => (
-              <PersonaCard
-                key={persona.id}
-                persona={persona}
-                deleting={deleting.has(persona.id)}
-                onSaved={(saved) =>
-                  setPersonas((current) =>
-                    (current ?? []).map((item) => (item.id === saved.id ? saved : item)),
-                  )
-                }
-                onDelete={() => void remove(persona.id)}
-                onError={setError}
-              />
-            ))
-          )}
-        </div>
+      {/* Tiles, two to a row on a wide screen: the form for a new one first, then
+          each persona, every tile in a row as tall as the tallest, so the page
+          fills the width the tabs above share with 내 플롯. */}
+      <div className="mt-6 grid gap-4 lg:grid-cols-2 lg:gap-6">
+        <Section title={t('new')} busy={busy}>
+          <Field label={t('name')}>
+            <TextInput
+              value={name}
+              placeholder={t('namePlaceholder')}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </Field>
+          <Field label={t('description')}>
+            <TextArea
+              rows={3}
+              value={description}
+              placeholder={t('descriptionPlaceholder')}
+              onChange={(event) => setDescription(event.target.value)}
+            />
+          </Field>
+          <Button
+            variant="primary"
+            busy={busy}
+            disabled={!name.trim()}
+            onClick={() => void create()}
+          >
+            {t('create')}
+          </Button>
+        </Section>
+
+        {personas === null ? (
+          <div className="flex items-center justify-center py-10">
+            <Spinner label={common('loading')} />
+          </div>
+        ) : personas.length === 0 ? (
+          <p className="self-center py-6 text-center text-sm text-muted">{t('empty')}</p>
+        ) : (
+          personas.map((persona) => (
+            <PersonaCard
+              key={persona.id}
+              persona={persona}
+              deleting={deleting.has(persona.id)}
+              onSaved={(saved) =>
+                setPersonas((current) =>
+                  (current ?? []).map((item) => (item.id === saved.id ? saved : item)),
+                )
+              }
+              onDelete={() => void remove(persona.id)}
+              onError={setError}
+            />
+          ))
+        )}
       </div>
     </div>
   );
@@ -178,7 +175,7 @@ function PersonaCard({
   }
 
   return (
-    <fieldset disabled={busy} aria-busy={busy || undefined} className="min-w-0 space-y-4 border border-line bg-surface/60 p-5">
+    <fieldset disabled={busy} aria-busy={busy || undefined} className="min-w-0 space-y-4 rounded-2xl border border-line bg-surface p-5 sm:p-6">
       <PersonaAvatarPicker
         persona={persona}
         name={name}

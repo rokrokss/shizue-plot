@@ -226,7 +226,7 @@ function NoteCard({
   }
 
   return (
-    <fieldset disabled={saving || deleting} aria-busy={saving || deleting || undefined} data-testid="note-card" className="min-w-0 space-y-4 rounded-xl border border-line bg-surface/60 p-5">
+    <fieldset disabled={saving || deleting} aria-busy={saving || deleting || undefined} data-testid="note-card" className="min-w-0 space-y-4 rounded-2xl border border-line bg-surface p-5 sm:p-6">
       <Field label={t('noteTitle')}>
         <TextInput value={title} onChange={(event) => setTitle(event.target.value)} />
       </Field>

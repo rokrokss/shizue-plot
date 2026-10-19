@@ -83,7 +83,7 @@ describe('MobileTabBar', () => {
   });
 
   it('lights 설정 up on any of its sections', async () => {
-    pathname = '/settings/display';
+    pathname = '/settings';
     await render();
 
     expect(named('설정').getAttribute('aria-current')).toBe('page');

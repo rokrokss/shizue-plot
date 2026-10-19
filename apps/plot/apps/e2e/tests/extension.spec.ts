@@ -40,7 +40,7 @@ test('Connecting ChatGPT through Shizue', async () => {
     const page = await context.newPage();
     await page.goto(`${WEB_URL}/ko/settings`);
     await page.getByRole('button', { name: 'ChatGPT로 계속하기' }).click();
-    await expect(page).toHaveURL(`${WEB_URL}/ko/settings/models`);
+    await expect(page).toHaveURL(`${WEB_URL}/ko/settings`);
     await expect(page.getByTitle(email)).toBeVisible();
     await expect(page.getByText('ChatGPT 요금제를 사용하고 있습니다.')).toBeVisible();
   } finally {

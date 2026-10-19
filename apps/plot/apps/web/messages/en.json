@@ -18,17 +18,11 @@
       "ai": "AI",
       "app": "App"
     },
-    "items": {
+    "sections": {
       "models": "Models and connections",
       "display": "Display",
-      "backup": "Backup and restore",
-      "phoneAndBackup": "Phone and backup"
-    },
-    "hints": {
-      "models": "Model presets, ChatGPT, API keys",
-      "display": "Language and theme",
-      "backup": "Everything in the app folder, in one file",
-      "phoneAndBackup": "Open on a phone, back up and restore"
+      "devices": "Connect a phone",
+      "backup": "Backup and restore"
     }
   },
   "creatorTabs": {

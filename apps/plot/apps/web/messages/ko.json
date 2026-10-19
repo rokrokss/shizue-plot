@@ -18,17 +18,11 @@
       "ai": "AI",
       "app": "앱"
     },
-    "items": {
+    "sections": {
       "models": "모델과 연결",
       "display": "화면",
-      "backup": "백업과 복원",
-      "phoneAndBackup": "휴대폰 연결과 백업"
-    },
-    "hints": {
-      "models": "모델 프리셋, ChatGPT 연결, API 키",
-      "display": "언어와 테마",
-      "backup": "앱 폴더의 모든 것을 파일 하나로",
-      "phoneAndBackup": "휴대폰에서 열기, 백업과 복원"
+      "devices": "휴대폰 연결",
+      "backup": "백업과 복원"
     }
   },
   "creatorTabs": {

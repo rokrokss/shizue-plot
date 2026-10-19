@@ -679,10 +679,10 @@ test('keeps following the conversation when what stands under it shrinks back', 
 
 test('switches the UI locale to Japanese', async () => {
   // The language is one of 설정's, under 화면, with the theme.
-  await page.goto('/ko/settings/display');
+  await page.goto('/ko/settings');
   await page.getByLabel('언어').selectOption('ja');
 
-  await expect(page).toHaveURL(/\/ja\/settings\/display$/);
+  await expect(page).toHaveURL(/\/ja\/settings$/);
   await expect(
     page.getByRole('navigation').getByRole('link', { name: messages('ja').nav.create }),
   ).toBeVisible();

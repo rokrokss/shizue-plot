@@ -123,7 +123,7 @@ describe('Header', () => {
   });
 
   it('marks 설정 for its sections', async () => {
-    pathname = '/settings/display';
+    pathname = '/settings';
     await render();
 
     expect(cluster('설정').getAttribute('aria-current')).toBe('page');

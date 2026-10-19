@@ -84,7 +84,7 @@ function Connect({ errorCode }: { errorCode: string | undefined }) {
   async function connect(): Promise<void> {
     setBusy(true); setError('');
     try {
-      const { authorizationUrl } = await apiSend<{ authorizationUrl: string }>('POST', '/api/chatgpt/sign-in', { next: '/settings/models', locale }, AbortSignal.timeout(15_000));
+      const { authorizationUrl } = await apiSend<{ authorizationUrl: string }>('POST', '/api/chatgpt/sign-in', { next: '/settings', locale }, AbortSignal.timeout(15_000));
       const url = new URL(authorizationUrl);
       if (url.origin !== 'https://auth.openai.com') throw new Error(t('failed'));
       // Same tab, and busy until it leaves: Shizue brings this browser back to the callback.

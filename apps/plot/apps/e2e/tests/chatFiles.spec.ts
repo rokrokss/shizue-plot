@@ -124,7 +124,7 @@ test('its export goes into another work as the same messages, and the text and p
 });
 
 test('Settings makes a backup, and a restore of it waits for the next start until it is given up', async () => {
-  await page.goto('/ko/settings/backup');
+  await page.goto('/ko/settings');
   const card = page.getByTestId('backup-settings');
   await expect(card.getByRole('heading', { name: '백업과 복원' })).toBeVisible();
   const [backup] = await Promise.all([page.waitForEvent('download'), card.getByRole('link', { name: '백업 받기' }).click()]);
