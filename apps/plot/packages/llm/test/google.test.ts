@@ -25,6 +25,8 @@ describe('Google Gemini (AI Studio)', () => {
     expect(text).toBe('왔는지 본다누구세요?');
     expect(reasoning).toBe('누가 ');
     expect(done.usage).toEqual({ promptTokens: 30, completionTokens: 9, cachedPromptTokens: 10 });
+    // Why it ended, for the log: a reply cut at the cap says MAX_TOKENS here.
+    expect(done.finishReason).toBe('STOP');
     expect(sent[0]!.url).toBe('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse');
     expect(sent[0]!.url).not.toContain('AIza');
     expect(sent[0]!.headers['x-goog-api-key']).toBe('AIzaTestKey');

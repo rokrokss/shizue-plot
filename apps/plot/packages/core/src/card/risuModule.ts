@@ -33,7 +33,7 @@
  * the reader is told. The rest of such a module works as any other's.
  */
 
-import type { LoreEntry, PlotModule } from '../types.js';
+import type { DisplayScript, LoreEntry, PlotModule } from '../types.js';
 import { fromLorebookFile, LorebookFileError } from '../worldInfo.js';
 import { loreEntryFromBook, withoutTavernReading } from './bookEntry.js';
 import {
@@ -414,6 +414,50 @@ export function plotModuleOf(
     importedFrom: record.importedFrom,
   };
 }
+
+/**
+ * A module's display scripts as a chat draws them: the ones its import stored
+ * (`plotModuleOf`, the templates perhaps since rewritten to the work's own
+ * assets), with what an import before 2026-10-19 left out read again from the
+ * module's own `regex` — a template's leading line breaks, which that import
+ * cut (the module that turns its colour marker into `\n` drew nothing there),
+ * and RisuAI's `<no_end_nl>` and `<cbs>`. Only where the stored list is the one
+ * the regex makes, script for script; otherwise the stored list as it is.
+ *
+ * Every one of them runs (`runsEveryPattern`): a module is not edited here, and
+ * RisuAI runs each pattern it carries — the 소악마 module's dialogue boxes are
+ * two that the authoring screen (`displayScriptPatternError`) refuses.
+ */
+export function moduleDisplayScripts(module: Pick<PlotModule, 'regex' | 'displayScripts'>): DisplayScript[] {
+  const stored = module.displayScripts ?? [];
+  const fresh = displayScriptsFromExtensions({ risuai: { customScripts: module.regex } }) ?? [];
+  if (fresh.length !== stored.length) return runsEveryPattern(stored);
+  return runsEveryPattern(
+    stored.map((script, at) => {
+      const from = fresh[at]!;
+      if (from.in !== script.in) return script;
+      const lead = /^\n+/.exec(from.out)?.[0] ?? '';
+      return {
+        ...script,
+        ...(lead && !script.out.startsWith('\n') ? { out: lead + script.out } : {}),
+        ...(from.noEndNl ? { noEndNl: true as const } : {}),
+        ...(from.cbs ? { cbs: true as const } : {}),
+      };
+    }),
+  );
+}
+
+/**
+ * A RisuAI list the reader draws but does not edit — a module's, a prompt
+ * preset's — with every script on, as RisuAI runs every pattern it carries.
+ * The import switches off a pattern the authoring screen refuses
+ * (`displayScriptPatternError`), which is a lint for what a creator writes
+ * here; what keeps a pattern that hangs from hanging the page is the worker
+ * the display planner terminates, and one that does not compile is passed
+ * over there, as RisuAI passes it over.
+ */
+export const runsEveryPattern = (scripts: readonly DisplayScript[]): DisplayScript[] =>
+  scripts.map((script) => (script.enabled ? script : { ...script, enabled: true }));
 
 /**
  * A file RisuAI's module import takes — a charx (also one behind a JPEG, which

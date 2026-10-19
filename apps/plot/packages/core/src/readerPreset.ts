@@ -24,7 +24,10 @@
  * guessing.
  */
 import { decompressSync } from 'fflate';
+import { displayScriptsFromExtensions } from './card/risu.js';
+import { runsEveryPattern } from './card/risuModule.js';
 import { rpackDecode } from './card/risum.js';
+import type { DisplayScript } from './types.js';
 import { decodeMsgpack } from './msgpack.js';
 import {
   groupOtherBotRoleOf,
@@ -66,6 +69,18 @@ export function normalizePresetRegex(value: unknown): Record<string, unknown>[] 
     ? value.filter((script): script is Record<string, unknown> => script !== null && typeof script === 'object' && !Array.isArray(script))
     : [];
 }
+
+/**
+ * A preset regex's `editdisplay` scripts as display scripts, read as a card's
+ * are (`displayScriptsFromExtensions`): RisuAI's `processScriptFull` runs
+ * `presetRegex` first in every mode, the screen's included, so a chat on the
+ * preset draws its messages through them ahead of the work's and its modules'
+ * (`orderedWithModules`). Read from the stored regex each time, so a preset
+ * imported before this was drawn draws them too — every one of them on, as a
+ * module's (`runsEveryPattern`).
+ */
+export const presetDisplayScripts = (regex: readonly unknown[] | undefined): DisplayScript[] =>
+  runsEveryPattern(displayScriptsFromExtensions({ risuai: { customScripts: regex ?? [] } }) ?? []);
 
 /** A reader preset as it is stored (`reader_presets`), the prompt's part of it. */
 export interface StoredReaderPrompt {

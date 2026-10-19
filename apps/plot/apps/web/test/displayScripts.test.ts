@@ -4,6 +4,7 @@ import {
   applyDisplayScripts,
   MAX_HTML_CHARS,
   MAX_MATCHES_PER_SCRIPT,
+  MAX_RENDER_INPUT_CHARS,
   MAX_SCANNED_CHARS,
   MAX_SEGMENTS,
   readCustomUiEnabled,
@@ -70,7 +71,8 @@ describe('applyDisplayScripts', () => {
         script({ order: 0 }),
       ]),
     );
-    expect(html(segments)).toEqual(['<div class="x-shizue-hp"><b>겹침</b> 50</div>']);
+    // The `>` that ends a template is followed by a line break, as RisuAI writes one.
+    expect(html(segments)).toEqual(['<div class="x-shizue-hp"><b>겹침</b>\n 50</div>']);
   });
 
   it('binds $&, numbered and named groups', () => {
@@ -121,7 +123,7 @@ describe('applyDisplayScripts', () => {
     );
     // x → y, then y → <b>z</b>, then the z inside is wrapped. Reversed, the tie
     // would leave a bare `y`.
-    expect(html(segments)).toEqual(['<b><u>z</u></b>']);
+    expect(html(segments)).toEqual(['<b><u>z</u>\n</b>']);
   });
 
   it('binds the chat variables and platform values a template asks for', () => {
@@ -188,7 +190,7 @@ describe('chaining', () => {
       { in: '\\[img (\\w+)\\]', out: '<b>$1</b>' },
     );
     expect(html(applyDisplayScripts('[pic face]', context(scripts, { variables: { show: '1' } })))).toEqual([
-      '<p><b>face</b></p>',
+      '<p><b>face</b>\n</p>',
     ]);
     // Read before the next script runs, as RisuAI reads it: the block is gone, and
     // the later script finds nothing to rewrite.
@@ -219,7 +221,7 @@ describe('chaining', () => {
       ),
     );
     expect(text(segments)).toEqual(['A ', ' B']);
-    expect(html(segments)).toEqual(['<div class="x-shizue-card"><i>5</i></div>']);
+    expect(html(segments)).toEqual(['<div class="x-shizue-card"><i>5</i>\n</div>']);
   });
 
   it('reads the model’s words as RisuAI does, however many scripts move them, and nothing runs', () => {
@@ -238,7 +240,7 @@ describe('chaining', () => {
       ),
     );
     const [island] = html(segments);
-    expect(island).toContain('<div class="x-shizue-card">SHOWN <b><u>굵게</u></b>');
+    expect(island).toContain('<div class="x-shizue-card">SHOWN <b><u>굵게</u>\n</b>');
     expect(island).not.toContain('<script');
     expect(island).not.toContain('onerror');
   });
@@ -248,7 +250,7 @@ describe('chaining', () => {
       'hp=5',
       context(ordered({ in: 'hp=(\\d+)', out: '<span>$&</span>' }, { in: 'hp=', out: '<b>HP </b>' })),
     );
-    expect(html(segments)).toEqual(['<span><b>HP </b>5</span>']);
+    expect(html(segments)).toEqual(['<span><b>HP </b>\n5</span>']);
   });
 
   it('keeps the model’s words prose when a template only rearranges them', () => {
@@ -266,7 +268,7 @@ describe('chaining', () => {
       '[s]',
       context(ordered({ in: '\\[s\\]', out: '<p>ab</p>' }, { in: '(?=b)', out: '<i>·</i>' })),
     );
-    expect(html(segments)).toEqual(['<p>a<i>·</i>b</p>']);
+    expect(html(segments)).toEqual(['<p>a<i>·</i>\nb</p>']);
   });
 
   it('draws a RisuAI card’s panel and picture the way the card builds them', () => {
@@ -302,7 +304,7 @@ describe('chaining', () => {
     const [picture, panel] = html(drawn);
     expect(picture).toContain('class="x-shizue-image-container"');
     expect(picture).toContain("url('/api/plots/p/assets/face')");
-    expect(panel).toBe('<div class="x-shizue-pk-card">\n<div class="x-shizue-pk-time">1247 · 본부</div>\n</div>');
+    expect(panel).toBe('<div class="x-shizue-pk-card">\n<div class="x-shizue-pk-time">1247 · 본부</div>\n\n</div>');
 
     // No image by that name: the reference goes, rather than drawing a broken one.
     expect(html(applyDisplayScripts(content, bound({ assetNames: [] })))[0]).not.toContain('image-container');
@@ -757,10 +759,11 @@ describe('work that produces nothing', () => {
 
   it('pays for what it hands the sanitizer before it hands it over', () => {
     // The template's reads are paid for in the worker; what reaches this thread is
-    // charged before the sanitizer sees any of it, so two hostile islands are
-    // refused whole rather than sanitized one after the other.
-    const segments = applyDisplayScripts('hp=1 hp=1', context([counter(hostile)]));
-    expect(plain(segments, 'hp=1 hp=1')).toBe(true);
+    // charged before the sanitizer sees any of it, so hostile islands past the
+    // allowance are refused whole rather than sanitized one after the other.
+    const enough = Array.from({ length: Math.ceil(MAX_RENDER_INPUT_CHARS / 89_000) }, () => 'hp=1').join(' ');
+    const segments = applyDisplayScripts(enough, context([counter(hostile)]));
+    expect(plain(segments, enough)).toBe(true);
   });
 
   it('returns promptly rather than eventually', () => {
@@ -784,9 +787,9 @@ describe('work that produces nothing', () => {
     );
     // One is affordable and draws…
     expect(html(applyDisplayScripts('hp=1', fanOut))).toHaveLength(1);
-    // …two are not, and the message stays as the model wrote it.
-    const two = 'hp=1'.repeat(2);
-    expect(plain(applyDisplayScripts(two, fanOut), two)).toBe(true);
+    // …enough of them to pass the allowance are not, and the message stays as the model wrote it.
+    const many = 'hp=1'.repeat(Math.ceil(MAX_RENDER_INPUT_CHARS / 70_000));
+    expect(plain(applyDisplayScripts(many, fanOut), many)).toBe(true);
   });
 
   it('still renders a message that is merely busy', () => {

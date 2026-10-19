@@ -29,6 +29,7 @@ import { mediaMarkup } from '../cbs';
 import { keepsElement, sanitizeCustomHtml } from '../sanitizeHtml';
 import { splitBlocks } from './blocks';
 import type { HastNode } from './hast';
+import { parseThoughtsAndTools, type ThoughtLabels } from './thoughts';
 
 /* ------------------------------------------------------------ indented code */
 
@@ -483,5 +484,10 @@ export function islandToHtml(html: string): string {
   );
 }
 
-/** An island as it may reach the DOM: rendered (`islandToHtml`), then sanitized. */
-export const renderIsland = (html: string): string => sanitizeCustomHtml(islandToHtml(html));
+/**
+ * An island as it may reach the DOM: its `<Thoughts>` folded as RisuAI folds
+ * them after the scripts (`parseThoughtsAndTools`, where `labels` are given),
+ * rendered (`islandToHtml`), then sanitized.
+ */
+export const renderIsland = (html: string, labels?: ThoughtLabels): string =>
+  sanitizeCustomHtml(islandToHtml(labels ? parseThoughtsAndTools(html, labels) : html));

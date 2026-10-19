@@ -326,7 +326,32 @@ describe('RisuAI script order', () => {
       ]),
     );
     expect(placed(card.displayScripts)).toEqual([['c', 0], ['a', 1], ['b', 2]]);
-    expect(card.displayScripts?.[2]?.out).toBe('<b>b</b>');
+    // Only the directive goes; the template's own line break stays, as RisuAI runs it.
+    expect(card.displayScripts?.[2]?.out).toBe('\n<b>b</b>');
+  });
+
+  it('keeps <no_end_nl>, <cbs> and a template’s leading line breaks, and writes them back out', () => {
+    // RisuAI's `processScriptFull` reads both off the flag field (`pscript.actions`)
+    // and runs the template as stored, its leading `\n` included.
+    const card = normalizeCard(
+      risuCard([
+        editdisplay({ in: 'a', out: '<i>a</i>', ableFlag: true, flag: 'g<no_end_nl>' }),
+        editdisplay({ in: '{{#if 1}}b{{/if}}', out: '', ableFlag: true, flag: 'g<cbs>' }),
+        editdisplay({ in: '#@%', out: '\n' }),
+        // Off, the field is read for nothing, directives included.
+        editdisplay({ in: 'd', out: 'D', ableFlag: false, flag: '<no_end_nl><cbs>' }),
+      ]),
+    );
+    expect(card.displayScripts?.map(({ in: source, out, noEndNl, cbs }) => ({ source, out, noEndNl, cbs }))).toEqual([
+      { source: 'a', out: '<i>a</i>', noEndNl: true, cbs: undefined },
+      { source: '{{#if 1}}b{{/if}}', out: '', noEndNl: undefined, cbs: true },
+      { source: '#@%', out: '\n', noEndNl: undefined, cbs: undefined },
+      { source: 'd', out: 'D', noEndNl: undefined, cbs: undefined },
+    ]);
+    const again = normalizeCard(exportCardV3(card));
+    expect(again.displayScripts?.map(({ noEndNl, cbs, out }) => ({ noEndNl, cbs, out }))).toEqual(
+      card.displayScripts?.map(({ noEndNl, cbs, out }) => ({ noEndNl, cbs, out })),
+    );
   });
 
   it('exports the scripts in the sequence they run here, without an order directive', () => {
@@ -411,6 +436,21 @@ describe('the background split', () => {
     });
     expect(splitBackground('<style>.a{background:url({{raw::bg.png}})}</style>')).toEqual({
       css: '.a{background:url({{raw::bg.png}})}',
+    });
+  });
+
+  it('keeps a sheet a CBS block draws or not in the background, as RisuAI reads the block first', () => {
+    // The 소악마 module's light and dark modes: one sheet each, behind a toggle.
+    const modes = [
+      '{{#if {{? {{getglobalvar::toggle_lightmode}}=0}}}}\n<style>.q{color:gold}</style>{{/if}}',
+      '{{#if {{? {{getglobalvar::toggle_lightmode}}=1}}}}\n<style>.q{color:green}</style>{{/if}}',
+    ].join('\n');
+    expect(stylesAreScripted(modes, [])).toBe(true);
+    expect(splitBackground(modes)).toEqual({ background: modes });
+    // A block that closes before the sheet leaves it a sheet like any other.
+    expect(splitBackground('{{#if 1}}<div>a</div>{{/if}}<style>.a{}</style>')).toEqual({
+      css: '.a{}',
+      background: '{{#if 1}}<div>a</div>{{/if}}',
     });
   });
 

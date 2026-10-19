@@ -101,11 +101,14 @@ describe('ModuleToggles', () => {
     expect(rain.checked).toBe(true);
     await act(async () => rain.click());
     const sky = section.querySelector('select')!;
-    // A select's value is the chosen option's index, as RisuAI stores it.
+    // A select's value is the chosen option's index, as RisuAI stores it — and,
+    // unset, none is chosen, as RisuAI's select shows none, rather than the first.
     expect([...sky.options].map((option) => [option.value, option.textContent])).toEqual([
+      ['', ''],
       ['0', '맑음'],
       ['1', '흐림'],
     ]);
+    expect(sky.value).toBe('');
     await act(async () => {
       sky.value = '1';
       sky.dispatchEvent(new Event('change', { bubbles: true }));

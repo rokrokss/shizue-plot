@@ -102,6 +102,9 @@ export function ModuleToggles({
                 value={valueOf(entry.key)}
                 onChange={(event) => void onSet(toggleVariable(entry.key), event.target.value)}
               >
+                {/* Unset, RisuAI's select shows no option chosen (its value matches none),
+                    where React's would fall to the first: an empty one stands for it. */}
+                {valueOf(entry.key) === '' ? <option value="" hidden /> : null}
                 {(entry.options ?? []).map((option, at) => (
                   <option key={at} value={String(at)}>
                     {option}

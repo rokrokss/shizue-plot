@@ -137,7 +137,8 @@ describe('the background under the display scripts', () => {
 
     await land(planFor(html));
     expect(drawn()).toBe(
-      '<em class="x-shizue-word">밤</em>\n<div class="x-shizue-hud">HP <b class="x-shizue-hp">42</b> · **굵게** </div>',
+      // A template that ends in `>` is followed by a line break, as RisuAI writes one.
+      '<em class="x-shizue-word">밤</em>\n\n<div class="x-shizue-hud">HP <b class="x-shizue-hp">42</b>\n · **굵게** </div>',
     );
   });
 
@@ -155,7 +156,7 @@ describe('the background under the display scripts', () => {
     render(next);
     expect(drawn()).toContain('HP <b class="x-shizue-hp">42</b>');
     await land(planFor(next));
-    expect(drawn()).toBe('<div class="x-shizue-hud">다음 <b class="x-shizue-hp">42</b></div>');
+    expect(drawn()).toBe('<div class="x-shizue-hud">다음 <b class="x-shizue-hp">42</b>\n</div>');
   });
 
   it('draws the source when the planner has nothing for it, and at once without scripts', async () => {

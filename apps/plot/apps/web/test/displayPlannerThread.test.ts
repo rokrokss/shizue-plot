@@ -103,7 +103,7 @@ describe('a pattern that does not come back', () => {
     });
     expect(plan?.body).toEqual([
       { kind: 'text', text: '앞 ' },
-      { kind: 'html', html: '<div>HP \u000250\u0003 · \u000112\u0001</div>' },
+      { kind: 'html', html: '<div>HP \u000250\u0003 · \u000112\u0001</div>\n' },
       { kind: 'text', text: ' 뒤' },
     ]);
     // A card's phone layout reads the window the page sent, the thread having none.
@@ -147,7 +147,7 @@ describe('a pattern that does not come back', () => {
       previousSameRole: '',
       context: ordinary,
     });
-    expect(after?.body).toEqual([{ kind: 'html', html: '<div>HP \u000250\u0003 · \u000112\u0001</div>' }]);
+    expect(after?.body).toEqual([{ kind: 'html', html: '<div>HP \u000250\u0003 · \u000112\u0001</div>\n' }]);
     planner.stop();
   }, 30_000);
 

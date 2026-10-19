@@ -50,7 +50,7 @@ import type { DisplayScript } from './types';
 /**
  * How long a plan may take before the worker is treated as hung.
  *
- * Twenty times the transform's own 50ms budget. Well clear of any honest plan —
+ * Four times the transform's own 250ms budget. Well clear of any honest plan —
  * the cooperative deadline stops those long before this one is reached, even on a
  * thread sharing a core with a busy page — and short enough that a pattern which
  * never returns costs a background thread a second rather than the rest of the

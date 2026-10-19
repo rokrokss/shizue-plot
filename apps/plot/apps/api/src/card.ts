@@ -20,6 +20,7 @@ import {
   MAX_CREATOR_CSS_LENGTH,
   MAX_DISPLAY_PATTERN_LENGTH,
   MAX_INTRO_LENGTH,
+  moduleDisplayScripts,
   splitBackground,
   type ComponentCapability,
   type DisplayScript,
@@ -239,6 +240,9 @@ function coerceDisplayScript(value: unknown, index: number): DisplayScript {
     ...(action === 'move_top' || action === 'move_bottom' || action === 'repeat_back'
       ? { action }
       : {}),
+    // RisuAI's `<no_end_nl>` and `<cbs>` the import kept.
+    ...(raw['noEndNl'] === true ? { noEndNl: true as const } : {}),
+    ...(raw['cbs'] === true ? { cbs: true as const } : {}),
     enabled: bool(raw['enabled'], true),
     // The member the script is for (`DisplayScript.memberId`). Whether it is one
     // of this plot's is the route's to check, holding the roster.
@@ -439,7 +443,7 @@ export function readerCustomUi(
   const own = customUi?.displayScripts ?? [];
   const modules = customUi?.modules ?? [];
   return {
-    displayScripts: modules.length > 0 ? orderedWithModules(own, modules.map((module) => module.displayScripts ?? [])) : own,
+    displayScripts: modules.length > 0 ? orderedWithModules(own, modules.map(moduleDisplayScripts)) : own,
     css: [customUi?.css ?? '', ...modules.map((module) => module.css ?? '')].filter((css) => css.trim()).join('\n\n'),
     backgroundHtml: [background, ...modules.map((module) => module.backgroundHtml ?? '')]
       .filter((html) => html.trim())

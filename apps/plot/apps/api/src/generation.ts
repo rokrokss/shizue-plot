@@ -1091,6 +1091,14 @@ async function runGeneration(
         }
         usage = next.value.usage;
         cached(next.value.usage);
+        // A reply cut at the model's output cap reads as a reply that stopped
+        // short; the log says which it was. A thinking model spends the cap on
+        // its reasoning too, so both lengths are named.
+        if (next.value.finishReason === 'MAX_TOKENS') {
+          console.warn(
+            `[generation] chat ${plan.chatId}: the reply ended at the model's output cap (MAX_TOKENS) after ${usage.completionTokens} completion tokens, reasoning included (${reasoning.length} characters of reasoning, ${text.length} of reply)`,
+          );
+        }
       } catch (error) {
         // A stop surfaces as an abort error, and a stream the upstream let go quiet
         // as `chatgpt_timeout`; both keep what arrived. Anything else is a real

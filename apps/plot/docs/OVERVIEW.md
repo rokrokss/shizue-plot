@@ -48,7 +48,7 @@ shizue가 RisuAI·SillyTavern 작품을 어떻게 돌리고, 긴 대화를 어�
 
 - **우리가 더하는 것**: 말하는 규칙(`이름:` 줄 — 화면이 말풍선과 나레이션 상자를 나누는 근거, 제타식), 이번 턴 기억, 작품의 내레이터·연출 지시와 게임 판정, 답장 언어 줄. RisuAI에는 이것들의 자리가 없어 이번 턴 묶음에 둔다. 이 밖에 우리가 더하는 지시는 없다 — OAI 탈옥 문구도 기본 프리셋의 한 항목이라, 다른 프리셋은 제가 정한 대로 보낸다.
 - **탈옥은 토글이다.** RisuAI의 `jailbreakToggle`처럼 기본은 꺼져 있고, 프리셋의 탈옥 항목과 탈옥 글은 챗 설정의 토글 칸에 있는 탈옥 토글을 켰을 때만 간다. 값은 작품의 전역 변수로 남는다(로컬 토글을 켠 챗은 그 챗의 것).
-- **프리셋의 나머지 RisuAI 설정도 RisuAI처럼 읽는다.** `promptSettings`(`sendName`, `sendChatAsSystem`, `trimStartNewChat`, `postEndInnerFormat` 등), ChatML 항목, `{{position::이름}}` 자리, 프리셋 정규식(카드의 스크립트보다 먼저 보내는 글에 돈다), 이어 쓰기의 `[Continue the last response]`, 응답의 `<Thoughts>` 떼기, `{{asset_prompt::}}` 그림. RisuAI 프리셋을 가져오면 `promptSettings`와 프리셋 정규식도 함께 온다(편집 칸은 아직 없다).
+- **프리셋의 나머지 RisuAI 설정도 RisuAI처럼 읽는다.** `promptSettings`(`sendName`, `sendChatAsSystem`, `trimStartNewChat`, `postEndInnerFormat` 등), ChatML 항목, `{{position::이름}}` 자리, 프리셋 정규식(RisuAI처럼 모든 모드에서 카드·모듈의 스크립트보다 먼저 돈다 — 보내는 글, 입력, 출력, 번역, 화면), 이어 쓰기의 `[Continue the last response]`, 응답의 `<Thoughts>` 떼기, `{{asset_prompt::}}` 그림. RisuAI 프리셋을 가져오면 `promptSettings`와 프리셋 정규식도 함께 온다(편집 칸은 아직 없다).
 - **`cache` 항목은 Claude의 캐시 지점이다.** RisuAI처럼 그 항목 앞의 턴에 캐시 표시를 달고, Anthropic 프로필 프리셋의 요청이 그 자리에 `cache_control`을 붙인다. 다른 제공자는 표시를 읽지 않는다.
 - **여러 멤버 작품**은 RisuAI의 그룹챗 그대로다. 말하는 화자의 카드만 설명에 넣고, 다른 멤버의 답장은 `<이름's Message>`로 감싸 보내며, 끝에 `[Write the next reply only as 이름]`이 붙는다.
 - **OAI2는 템플릿이라** RisuAI처럼 카드의 시스템 프롬프트를 읽지 않고, 시작 트리거의 `start`·`historyend` 주입도 갈 곳이 없어 보내지 않는다. 카드의 post-history 지시는 글로벌 노트 자리에 간다. 템플릿이 없는 프리셋(RisuAI 기본 순서)을 고르면 둘 다 RisuAI처럼 간다.

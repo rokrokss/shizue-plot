@@ -46,12 +46,19 @@ const OUT_ORDER = /<order[ \t]+(-?\d+)>/i;
  */
 const ACTIONS: readonly DisplayScriptAction[] = ['move_top', 'move_bottom', 'repeat_back'];
 
-/** Reads the action an older card puts in `out`, and returns the template without its directives. */
+/**
+ * Reads the action an older card puts in `out`, and returns the template without
+ * its directives. Only a directive's own line break goes with it: a template that
+ * names none keeps the line breaks it starts with, as RisuAI runs it — the
+ * module that turns a `# Response` line into `\n` needs that `\n`.
+ */
 function parseOutDirectives(out: string): { action?: DisplayScriptAction; template: string } {
   const action = OUT_ACTION.exec(out);
+  const template = out.replace(OUT_ORDER, '');
+  if (!action) return { template };
   return {
-    ...(action ? { action: action[1]!.toLowerCase() as DisplayScriptAction } : {}),
-    template: out.replace(OUT_ACTION, '').replace(OUT_ORDER, '').replace(/^\n+/, ''),
+    action: action[1]!.toLowerCase() as DisplayScriptAction,
+    template: template.replace(OUT_ACTION, '').replace(/^\n+/, ''),
   };
 }
 
@@ -87,6 +94,9 @@ function toDisplayScript(raw: Record<string, unknown>): Unplaced | null {
       out: fromOut.template,
       ...(flags ? { flags } : {}),
       ...(action ? { action } : {}),
+      // RisuAI reads these two off the flag field alone (`pscript.actions`).
+      ...(fromFlag.actions.includes('no_end_nl') ? { noEndNl: true as const } : {}),
+      ...(fromFlag.actions.includes('cbs') ? { cbs: true as const } : {}),
       // A pattern this build refuses to run is imported switched off rather than
       // dropped, so the creator can still see it and rewrite it.
       enabled: displayScriptPatternError(source) === null,
@@ -226,10 +236,27 @@ export const backgroundWithoutStyles = (html: string): string => html.replace(ST
  * on the linear engine (`linearMatches`); one it cannot compile is passed over.
  */
 export function stylesAreScripted(html: string, scripts: readonly DisplayScript[] | undefined): boolean {
-  const styles = [...html.matchAll(STYLE_ELEMENT)].map((element) => element[0]);
+  const elements = [...html.matchAll(STYLE_ELEMENT)];
+  const styles = elements.map((element) => element[0]);
   if (styles.some((style) => style.replace(ASSET_ADDRESS_MACRO, '').includes('{{'))) return true;
+  // A sheet inside a CBS block is the block's to draw or not: the 소악마 module
+  // keeps a sheet for each of its light and dark modes, each in an
+  // `{{#if {{? {{getglobalvar::toggle_lightmode}}=N}}}}`, and lifted out of them
+  // every mode's sheet applied at once, the last one winning.
+  if (elements.some((element) => insideCbsBlock(html, element.index))) return true;
   const live = (scripts ?? []).filter((script) => script.enabled && script.in);
   return styles.some((style) => live.some((script) => linearMatches(script.in, script.flags ?? '', style) === true));
+}
+
+/**
+ * Whether the text before `at` leaves a CBS block open — more `{{#…}}` openers
+ * (`{{#if}}`, `{{#when}}`, `{{#each}}`, …) than `{{/…}}` closers before it.
+ */
+function insideCbsBlock(html: string, at: number): boolean {
+  const before = html.slice(0, at);
+  const opened = before.match(/\{\{#/g)?.length ?? 0;
+  const closed = before.match(/\{\{\//g)?.length ?? 0;
+  return opened > closed;
 }
 
 /** A RisuAI background as the import keeps it (`splitBackground`). */
@@ -308,6 +335,8 @@ function toCustomScript(script: DisplayScript, ranked: boolean): Record<string, 
   const flag = [
     script.flags ?? '',
     ...(script.action ? [`<${script.action}>`] : []),
+    ...(script.noEndNl ? ['<no_end_nl>'] : []),
+    ...(script.cbs ? ['<cbs>'] : []),
     ...(ranked && script.rank !== undefined ? [`<order ${script.rank}>`] : []),
   ].join('');
   return {

@@ -6,13 +6,14 @@ import { zipSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
 import {
   indicatorLore,
+  moduleDisplayScripts,
   ModuleParseError,
   readRisuModule,
   plotModuleOf,
   risuLoreBookEntry,
 } from '../src/card/risuModule.js';
 import { assemblePrompt, type PromptCharacter, type PromptPlot } from '../src/prompt.js';
-import { cardScripts, runTriggersSync, scriptedMember } from '../src/triggers/index.js';
+import { cardScripts, runTriggersSync, scriptedMember, translationScriptsOf } from '../src/triggers/index.js';
 import { DEFAULT_LORE_SETTINGS, type NormalizedCard, type PlotModule } from '../src/types.js';
 import { buildCharx } from './helpers/charx.js';
 import { buildRisum } from './helpers/risum.js';
@@ -331,6 +332,29 @@ describe('plotModuleOf', () => {
     expect(module.inert).toBeUndefined();
   });
 
+  it('draws a module imported before 2026-10-19 with what its import left out, every pattern on', () => {
+    const regex = [
+      { in: '#@%#@%', out: '\n', type: 'editdisplay', ableFlag: false },
+      { in: '{{#if 1}}x{{/if}}', out: '', type: 'editdisplay', ableFlag: true, flag: 'g<cbs>' },
+      // A pattern the authoring screen refuses, which RisuAI runs.
+      { in: '(?:(?!")|a)+b', out: '<i>$&</i>', type: 'editdisplay', ableFlag: true, flag: 'g<no_end_nl>' },
+    ];
+    // What the import made of it then: the leading break cut, the directives and the pattern dropped.
+    const stored = [
+      { in: '#@%#@%', out: '', order: 0, enabled: true },
+      { in: '{{#if 1}}x{{/if}}', out: '', order: 1, enabled: true },
+      // Templates since rewritten to the work's own assets stay as they are.
+      { in: '(?:(?!")|a)+b', out: '<i>$&</i><img src="/api/plots/p/assets/a">', order: 2, enabled: false },
+    ];
+    expect(moduleDisplayScripts({ regex, displayScripts: stored })).toEqual([
+      { in: '#@%#@%', out: '\n', order: 0, enabled: true },
+      { in: '{{#if 1}}x{{/if}}', out: '', order: 1, enabled: true, cbs: true },
+      { in: '(?:(?!")|a)+b', out: '<i>$&</i><img src="/api/plots/p/assets/a">', order: 2, enabled: true, noEndNl: true },
+    ]);
+    // A stored list that is not the one the regex makes is drawn as it is, its patterns on.
+    expect(moduleDisplayScripts({ regex: [], displayScripts: [stored[2]!] })).toEqual([{ ...stored[2], enabled: true }]);
+  });
+
   it('keeps RisuAI’s hideIcon, and an MCP server and cjs code only as a record of what is never run', async () => {
     const json = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
     const record = { id: 'm-2', name: 'x', description: '', lorebook: [], assets: [], importedFrom: { fileName: 'x.json', sha256: 'x', importedAt: '2026-10-15T00:00:00.000Z' } };
@@ -416,6 +440,17 @@ describe('a work’s modules in the scripts', () => {
     expect(cardScripts(own)!.triggers[0]!.lowLevelAccess).toBeUndefined();
     // A module of only lore adds nothing to run.
     expect(cardScripts(own, [work({ regex: [], trigger: [] })])).toEqual(cardScripts(own));
+  });
+
+  it('runs the chat’s prompt preset’s edit scripts first, as RisuAI puts presetRegex first in every mode', () => {
+    const preset = [
+      { in: 'p', out: 'P', type: 'editoutput' },
+      { in: 'q', out: 'Q', type: 'editdisplay' },
+    ];
+    expect(cardScripts(own, [work()], preset)!.editScripts.map((script) => script.in)).toEqual(['p', 'c', 'm']);
+    // A card with none of its own runs the preset's.
+    expect(cardScripts(card({}), [], preset)!.editScripts.map((script) => script.in)).toEqual(['p']);
+    expect(translationScriptsOf(own, [work({ regex: [{ in: 'mt', out: '', type: 'edittrans' }] })], [{ in: 'pt', out: '', type: 'edittrans' }]).map((script) => script.in)).toEqual(['pt', 'mt']);
   });
 
   it('makes a card with none of its own a scripted one, and the work’s first member the lead', async () => {

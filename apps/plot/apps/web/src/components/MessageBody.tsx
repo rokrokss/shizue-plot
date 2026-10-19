@@ -44,6 +44,7 @@ import {
   renderMediaTokens,
 } from '@/lib/markdown/html';
 import { rehypeDialogueQuotes } from '@/lib/markdown/quotes';
+import { parseThoughtsAndTools, type ThoughtLabels } from '@/lib/markdown/thoughts';
 import { isExternalUrl, isSameOriginUrl, MESSAGE_SCOPE_CLASS } from '@/lib/sanitizeHtml';
 import { speakerAliases, speechRuns } from '@/lib/speechRuns';
 import { useBodyTranslation, type BodyTranslation } from '@/lib/translation';
@@ -640,16 +641,23 @@ export const MessageBody = memo(function MessageBody({
   const t = useTranslations('chat');
   const common = useTranslations('common');
   const { plan, held } = useDisplayPlan(content, display, chatIndex, previousSameRole, streaming);
+  /** What RisuAI's fold of a `<Thoughts>` and its tool line say (`parseThoughtsAndTools`). */
+  const cot = t('thoughtsSummary');
+  const toolCalled = t('toolCalled', { tool: '{{tool}}' });
+  const labels = useMemo<ThoughtLabels>(() => ({ cot, toolCalled }), [cot, toolCalled]);
 
   const segments = useMemo<BodySegment[]>(() => {
     const plain: Segment[] = [{ kind: 'text', text: content }];
     // The plan is the message as the scripts and their CBS made it; what is left
-    // is RisuAI's markdown over the islands and the sanitizing, done here, where
-    // there is a DOM.
-    const base = plan ? (renderDisplayPlan(plan, renderIsland) ?? plain) : plain;
+    // is RisuAI's fold of its thoughts, its markdown over the islands and the
+    // sanitizing, done here, where there is a DOM. An island the sanitizer
+    // leaves nothing of — the `<Thoughts>` a module puts before a turn it never
+    // closes — draws nothing, rather than an empty box.
+    const rendered = plan ? renderDisplayPlan(plan, (html) => renderIsland(html, labels)) : null;
+    const base = rendered ? rendered.filter((segment) => segment.kind !== 'html' || segment.html.trim() !== '') : plain;
     if (componentContext) return splitComponentCalls(base, componentContext.names);
     return componentNames ? escapeComponentCalls(base, componentNames) : base;
-  }, [content, componentContext, componentNames, plan]);
+  }, [content, componentContext, componentNames, plan, labels]);
 
   /**
    * Each text segment, already resolved, attributed and cut into blocks. The
@@ -689,7 +697,10 @@ export const MessageBody = memo(function MessageBody({
           assets,
           resolveAsset,
         );
-        const chunks = markupChunks(buttons ? renderProseButtons(own, buttons) : own);
+        // RisuAI folds a `<Thoughts>` the message itself closes after the scripts,
+        // before the markdown: the fold is then a block of the message's own HTML.
+        const folded = parseThoughtsAndTools(own, labels);
+        const chunks = markupChunks(buttons ? renderProseButtons(folded, buttons) : folded);
         return chunks.flatMap((chunk, nth): TextRun[] => {
           if (chunk.html) {
             const markup = unescapeCbs(renderImageTokensAsHtml(chunk.text, assets, resolveAsset, userImage), 'html');
@@ -720,7 +731,7 @@ export const MessageBody = memo(function MessageBody({
       );
       return { runs: owned, soleOwns: true };
     },
-    [segments, assets, resolveAsset, roster, speaker, soleMember, namesExpected, streaming, face?.name, userImage, buttons],
+    [segments, assets, resolveAsset, roster, speaker, soleMember, namesExpected, streaming, face?.name, userImage, buttons, labels],
   );
   // RisuAI translates here: after the display scripts and the speaker split, before the markdown.
   const shown = useBodyTranslation(segments, runs, translation, streaming);

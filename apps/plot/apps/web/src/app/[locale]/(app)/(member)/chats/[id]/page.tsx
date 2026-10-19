@@ -744,13 +744,15 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   // only ever render for the creator.
   // The reader's own modules' after the work's, sorted with them by RisuAI's
   // `<order N>` (`orderedWithModules`), as RisuAI runs a character's regex and
-  // every module's on the chat as one list.
+  // every module's on the chat as one list — and the chat's reader preset's
+  // ahead of them all, as RisuAI's `presetRegex` is.
+  const presetScripts = chatModules?.presetDisplayScripts;
   const scripts: DisplayScript[] = useMemo(
     () =>
-      readerModules.length > 0
-        ? orderedWithModules(plot?.displayScripts ?? [], readerModules.map((module) => module.displayScripts))
+      readerModules.length > 0 || presetScripts?.length
+        ? orderedWithModules(plot?.displayScripts ?? [], readerModules.map((module) => module.displayScripts), presetScripts)
         : (plot?.displayScripts ?? []),
-    [plot, readerModules],
+    [plot, readerModules, presetScripts],
   );
   const creatorCss = [plot?.css ?? '', ...readerModules.map((module) => module.css)].filter((css) => css.trim()).join('\n\n');
   /**

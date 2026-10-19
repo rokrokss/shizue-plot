@@ -481,7 +481,7 @@ describe('malformed templates', () => {
   });
 
   it('bounds the output of a template that only repeats text', () => {
-    const wide = Array.from({ length: 200 }, (_, i) => `i${i}`).join(',');
+    const wide = Array.from({ length: 250 }, (_, i) => `i${i}`).join(',');
     expect(() =>
       render(`{{#each w}}${'x'.repeat(2000)}{{/each}}`, { variables: { w: wide } }),
     ).toThrow(RenderBudgetExhausted);

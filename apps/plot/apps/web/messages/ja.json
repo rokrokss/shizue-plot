@@ -935,6 +935,8 @@
     "bgmUnmute": "音楽のミュートを解除",
     "closeCardScreen": "カード画面を閉じる",
     "copyCode": "コードをコピー",
+    "thoughtsSummary": "思考の連鎖",
+    "toolCalled": "ツール「{tool}」を呼び出しました",
     "copied": "コピーしました",
     "streamError": "応答が途中で途切れました。再生成で続けられます。",
     "serverGenerating": "返信をサーバーで生成し続けています。終わるとここに表示されます。",

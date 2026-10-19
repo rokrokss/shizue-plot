@@ -935,6 +935,8 @@
     "bgmUnmute": "Unmute music",
     "closeCardScreen": "Close card screen",
     "copyCode": "Copy code",
+    "thoughtsSummary": "Chain of Thoughts",
+    "toolCalled": "Tool ''{tool}'' Called",
     "copied": "Copied",
     "streamError": "The response was interrupted. You can regenerate to continue.",
     "serverGenerating": "The reply is still being generated on the server. It will appear here when it’s done.",

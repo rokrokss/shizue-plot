@@ -73,6 +73,23 @@ describe('HTML in a message', () => {
     expect(host.querySelector('.message-body > p > em')?.textContent).toBe('그녀가 웃는다.');
   });
 
+  it('folds the reasoning a reply closed in <Thoughts>, as RisuAI does, and leaves an open one as its text', () => {
+    render({ content: '<Thoughts>\n그가 *왜* 왔을까.\n</Thoughts>\n\n"어서 와."' });
+    const fold = islands()[0]!.querySelector('details');
+    expect(fold?.querySelector('summary')?.textContent).toBe('생각의 사슬');
+    expect(fold?.hasAttribute('open')).toBe(false);
+    // One HTML block to the markdown, as markdown-it reads `<details>` up to a blank line: RisuAI shows the `*` too.
+    expect(fold?.textContent).toContain('그가 *왜* 왔을까.');
+    expect(host.textContent).not.toContain('Thoughts');
+    expect(host.textContent).toContain('어서 와.');
+
+    // Cut off before it closed: nothing to fold, and the sanitizer keeps no `<thoughts>`.
+    render({ content: '<Thoughts>\n그가 왜 왔을까' });
+    expect(host.querySelector('details')).toBeNull();
+    expect(host.textContent).toContain('그가 왜 왔을까');
+    expect(host.textContent).not.toContain('<Thoughts>');
+  });
+
   it('draws markdown around and between the tags', () => {
     render({ content: '<details>\n<summary>상태</summary>\n\n**HP** 10\n\n</details>' });
 

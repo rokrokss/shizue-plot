@@ -158,26 +158,38 @@ export function displayContextAt(
 
 /* --------------------------------------------------------------- the budget */
 
-/** A message longer than this is not worth scanning and is left as prose. */
-export const MAX_SCANNED_CHARS = 20_000;
-/** Matches one script may rewrite in one message. */
-export const MAX_MATCHES_PER_SCRIPT = 200;
-/** Pieces one message may be cut into, text runs and islands together. */
-export const MAX_SEGMENTS = 100;
+/**
+ * A message longer than this is not scanned and is left as prose. RisuAI scans
+ * every message whatever its length, and a reply a preset asks for at thousands
+ * of words, its reasoning ahead of it, runs past 20,000 characters, where the
+ * cap stood until 2026-10-19 — the whole of a module's rendering then fell away
+ * from exactly the replies it was written for. What stops a pattern that hangs
+ * is the worker the planner terminates, not this.
+ */
+export const MAX_SCANNED_CHARS = 100_000;
+/**
+ * Matches one script may rewrite in one message. A module that boxes every line
+ * of dialogue matches once a line, and a long reply has hundreds.
+ */
+export const MAX_MATCHES_PER_SCRIPT = 1_000;
+/** Pieces one message may be cut into, text runs and islands together — a boxed line and the prose after it are two. */
+export const MAX_SEGMENTS = 1_000;
 /**
  * Runs of provenance the planner may hold at once. A segment is made of many of
  * them — every capture inside an island is its own run — so this is the cap the
  * planner can hit first, and the one that bounds a template made of `$1`s.
  */
-export const MAX_PLAN_PIECES = 2_000;
+export const MAX_PLAN_PIECES = 10_000;
 /**
  * How long the rewritten message may grow while the scripts run. Scripts chain,
  * so each one scans what the ones before it wrote, and a template is expanded
  * into the text before anything is rendered. Charged as each expansion is built.
+ * Four times the longest message scanned, as a template that dresses every line
+ * of it adds its markup to every line.
  */
-export const MAX_WORKING_CHARS = 100_000;
+export const MAX_WORKING_CHARS = 400_000;
 /** Total sanitized HTML one message may produce. */
-export const MAX_HTML_CHARS = 100_000;
+export const MAX_HTML_CHARS = 400_000;
 /**
  * Raw input the sanitizer may take on across one message — charged *before* the
  * work, not measured after it.
@@ -193,13 +205,13 @@ export const MAX_HTML_CHARS = 100_000;
  * So each island is charged for the string it is about to hand the sanitizer,
  * before it does.
  *
- * The number is the same 100,000 as its neighbours (this, the intermediate cap in
- * `cbs.ts`, and the output cap above), which keeps all three holdable in one
- * thought. It is also roughly the 50ms matching deadline below expressed in
- * characters: the costliest content measured here runs at about half a microsecond
- * per charged character.
+ * The number is the same as the output cap above, which keeps the two holdable in
+ * one thought. At the costliest content measured here, about half a microsecond
+ * per charged character, the whole of it is a fifth of a second; it was 100,000
+ * until 2026-10-19, when the scan cap above went from 20,000 to 100,000
+ * characters and a reply that size, dressed line by line, needed the room.
  */
-export const MAX_RENDER_INPUT_CHARS = 100_000;
+export const MAX_RENDER_INPUT_CHARS = 400_000;
 /**
  * What the CBS reads of one message may take on, every read together: the
  * message's own, each script's output read again before the next script, and
@@ -219,8 +231,14 @@ export const MAX_EVALUATED_CHARS = 4 * MAX_RENDER_INPUT_CHARS;
  * which runs the transform in a worker and terminates it — so this deadline is what
  * keeps an *honest* transform from being slow, and termination is what keeps a
  * dishonest one from being fatal.
+ *
+ * 250ms since 2026-10-19 (50 before): a module of 150 scripts runs them all over
+ * a long reply — 38ms for one of 15,700 characters and 240 boxed lines on a
+ * desktop, which a phone takes several times as long over — and a plan past the
+ * deadline draws the reply as prose, its module's rendering gone. It runs in the
+ * worker, so the reader's thread never waits on it.
  */
-const TRANSFORM_DEADLINE_MS = 50;
+const TRANSFORM_DEADLINE_MS = 250;
 
 /** The caps the transform carries, passed in so a test can tighten them. */
 export interface PlanLimits {
@@ -373,15 +391,28 @@ export function transformDisplay(
    * `g` is always added too, but only so the run can walk the matches by
    * `lastIndex` — how many of them it rewrites is `rewritesEvery`'s to say.
    */
-  function compile(script: DisplayScript): RegExp | null {
+  function compile(script: DisplayScript, source: string = script.in): RegExp | null {
     let flags = script.flags ?? '';
     if (!flags.includes('g')) flags += 'g';
     if (!flags.includes('d')) flags += 'd';
     try {
-      return new RegExp(script.in, flags);
+      return new RegExp(source, flags);
     } catch {
       return null;
     }
+  }
+
+  /**
+   * The template a script binds its matches into, as RisuAI's `processScriptFull`
+   * makes it before every run (`executeScript`): `$n` is a line break, and a
+   * template that ends in `>` gets one after it unless the script says
+   * `<no_end_nl>` — so the text after a block a script wrote starts on a line of
+   * its own for the next script to match. Read here rather than at import, so a
+   * script imported before keeps the rule and an export writes `$n` back as it came.
+   */
+  function templateFor(script: DisplayScript): string {
+    const out = script.out.replaceAll('$n', '\n');
+    return out.endsWith('>') && !script.noEndNl ? `${out}\n` : out;
   }
 
   /**
@@ -749,7 +780,19 @@ export function transformDisplay(
       madeByScript = [];
       const topBefore = top.length;
       const bottomBefore = bottom.length;
-      const pattern = compile(entry.script);
+      const template = templateFor(entry.script);
+      // RisuAI's `<cbs>`: the pattern is read as CBS first, with the chat's
+      // bindings — a toggle's `{{#if}}` around it switches it on. One that reads
+      // as nothing matches nowhere and everywhere at once; with nothing to write
+      // there it changes nothing, as in RisuAI, and is passed over.
+      let source = entry.script.in;
+      if (entry.script.cbs) {
+        charge(source.length);
+        source = stripTaint(timed(() => renderProse(entry.script.in, evalCtx, charge)));
+        charge(source.length);
+        if (source === '' && template === '') continue;
+      }
+      const pattern = compile(entry.script, source);
       if (!pattern) continue;
       const unicode = pattern.flags.includes('u') || pattern.flags.includes('v');
       const every = rewritesEvery(entry.script);
@@ -773,7 +816,7 @@ export function transformDisplay(
         // What the match replaces stops existing as it is rewritten.
         size -= match[0].length;
         const joins = [insideIsland(view, start), insideIsland(view, end)];
-        const expansion = expand(entry.script.out, match, view, joins);
+        const expansion = expand(template, match, view, joins);
         if (entry.script.action === 'move_top') top.push(expansion);
         else if (entry.script.action === 'move_bottom') bottom.push(expansion);
         else next.push(...expansion);
@@ -792,11 +835,11 @@ export function transformDisplay(
       // The status-window idiom: a turn that says nothing about the state keeps
       // showing the last state that was reported, pinned above the prose.
       if (!matched && entry.script.action === 'repeat_back' && previousSameRole) {
-        const again = compile(entry.script);
+        const again = compile(entry.script, source);
         const previous = again ? (again.exec(previousSameRole) as Match | null) : null;
         if (previous) {
           const carried = layout([{ kind: 'text', text: previousSameRole, island: 0 }]);
-          top.push(expand(entry.script.out, previous, carried, [0, 0]));
+          top.push(expand(template, previous, carried, [0, 0]));
         }
       }
 
@@ -897,7 +940,10 @@ export function renderDisplayPlan(
     // Pay first. A stage that has not been paid for does not run.
     taken += html.length;
     if (taken > MAX_RENDER_INPUT_CHARS) throw new RenderBudgetExhausted('input');
-    const clean = render(html);
+    // The line break RisuAI puts after a template that ends in `>` is for what
+    // comes after it, which the next script matched against; an island stands
+    // on its own, so at its end the break draws nothing and goes.
+    const clean = render(html).replace(/\n+$/, '');
     produced += clean.length;
     if (produced > MAX_HTML_CHARS) throw new RenderBudgetExhausted('html');
     return { kind: 'html', html: clean };

@@ -618,6 +618,12 @@ export interface ActiveReaderModule {
 export interface ChatModulesView {
   library: ReaderModuleSummary[];
   active: ActiveReaderModule[];
+  /**
+   * The chat's reader preset's `editdisplay` regex as display scripts, which
+   * run ahead of the work's and the modules' (RisuAI's `presetRegex`). Optional
+   * for a hand-built view.
+   */
+  presetDisplayScripts?: DisplayScript[];
   /** The toggle text the chat's settings draw: the reader preset's, the modules' on the chat, then the members' own. */
   toggles: string;
   /** RisuAI's `HideIconStore`: the chat draws no message's sender picture or name. Optional for a hand-built view. */

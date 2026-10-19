@@ -176,7 +176,7 @@ export async function* readGeminiStream(response: Response, watch: IdleWatch, st
   if (!wrote && REFUSED.has(finish)) throw providerFailure('provider_refused', 502, finish);
   const rest = stop.flush();
   if (rest) yield { type: 'text', text: rest };
-  return { usage };
+  return { usage, finishReason: finish };
 }
 
 /**

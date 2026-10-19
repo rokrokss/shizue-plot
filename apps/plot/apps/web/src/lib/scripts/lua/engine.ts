@@ -249,12 +249,22 @@ export function createLuaEngine(options: LuaEngineOptions): ScriptEngine {
     similarity: (source, texts) => options.similarity(source, texts),
   };
 
-  function report(outcome: Exclude<LuaOutcome, { kind: 'done' }>, quiet = false): void {
+  function report(outcome: Exclude<LuaOutcome, { kind: 'done' }>, display = false): void {
+    // `disposed` is no limit: the page let the call go — its scripts were built
+    // anew, a module or a preset turned on, or the chat left — as RisuAI starts
+    // its Lua states afresh when the code changes. A display pass writes nothing
+    // and the set that took over draws the messages again, so it is not said; any
+    // other call's writes are dropped, and that is said as what it is.
+    if (outcome.kind === 'killed' && outcome.reason === 'disposed') {
+      if (display) return;
+      log({ kind: 'dropped', effect: 'triggerlua', message: 'the chat’s scripts were built anew while a Lua script ran; what it wrote is dropped' });
+      return;
+    }
     const message =
       outcome.kind === 'killed'
         ? `the Lua script was stopped (${outcome.reason}); what it wrote is dropped`
         : `the Lua script could not run: ${outcome.message}`;
-    if (quiet && said.has(message)) return;
+    if (display && said.has(message)) return;
     said.add(message);
     log({ kind: outcome.kind === 'killed' ? 'limit' : 'error', effect: 'triggerlua', message });
   }

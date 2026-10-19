@@ -338,8 +338,22 @@ export interface LoreSettings {
 export interface DisplayScript {
   /** Regular expression source, matched against the raw message text. */
   in: string;
-  /** HTML template. `$1`..`$99`, `$&` and `$<name>` bind the match; CBS macros bind the chat. */
+  /**
+   * HTML template. `$1`..`$99`, `$&` and `$<name>` bind the match; CBS macros bind
+   * the chat. Read as RisuAI's `processScriptFull` reads it when it runs: `$n` is
+   * a line break, and one that ends in `>` gets a line break after it unless
+   * `noEndNl` says otherwise.
+   */
   out: string;
+  /**
+   * RisuAI's `<no_end_nl>`: no line break after a template that ends in `>`.
+   */
+  noEndNl?: true;
+  /**
+   * RisuAI's `<cbs>`: the pattern is read as CBS before it is compiled, so a
+   * `{{#if}}` around it switches it on and off with a toggle.
+   */
+  cbs?: true;
   /**
    * Regex flags as the script's source compiled them. Absent or empty: every
    * match. Otherwise `g` decides — without it only the first match is rewritten

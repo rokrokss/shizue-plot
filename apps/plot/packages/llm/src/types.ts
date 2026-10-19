@@ -24,6 +24,11 @@ export interface StreamDone {
     /** Of `promptTokens`, those the provider served from its prompt cache; absent where it does not say. */
     cachedPromptTokens?: number;
   };
+  /**
+   * Why the provider ended the reply, in its own words, where its stream says
+   * (Gemini's `finishReason`: `STOP`, `MAX_TOKENS`, …). For the log alone.
+   */
+  finishReason?: string;
 }
 
 /**

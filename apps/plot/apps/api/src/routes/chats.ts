@@ -22,6 +22,8 @@ import {
   getPreset,
   characterName,
   presetHasJailbreak,
+  moduleDisplayScripts,
+  presetDisplayScripts,
   HYPA_V3_DEFAULTS,
   MAX_CHATS_PER_SUMMARY,
   MAX_QUERY_CHAT_COUNT,
@@ -2536,12 +2538,16 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
     // runs them for whichever character it asks.
     const { modules } = await chatModulesOf(deps, chat, plot);
     const roster = await loadMembers(deps.db, plot.id);
+    // The chat's reader preset's regex runs ahead of everything else, in every
+    // mode (RisuAI's `presetRegex`): its `editinput`/`editoutput` here, its
+    // `edittrans` with the translation, its `editdisplay` on the page.
+    const presetRegex = (await loadReaderPreset(deps, chat))?.regex ?? [];
     const translation = roster.flatMap((member) => {
-      const scripts = translationScriptsOf(member.card, modules);
+      const scripts = translationScriptsOf(member.card, modules, presetRegex);
       return scripts.length > 0 ? [{ memberId: member.id, scripts }] : [];
     });
     const scripted = roster.flatMap((member) => {
-      const scripts = cardScripts(member.card, modules);
+      const scripts = cardScripts(member.card, modules, presetRegex);
       return scripts ? [{ member, scripts }] : [];
     });
     if (scripted.length === 0) return c.json({ scripts: null, members: [], translation });
@@ -2725,6 +2731,7 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       loadMembers(deps.db, plot.id),
     ]);
     const on = new Set(reader.map((row) => row.id));
+    const readerPreset = await loadReaderPreset(deps, chat);
     return c.json({
       library: library.map((row) => ({
         ...toReaderModuleJson(row),
@@ -2736,18 +2743,24 @@ export function chatRoutes(deps: AppDeps): Hono<AppEnv> {
       active: reader.map((row) => ({
         id: row.id,
         name: row.module.name,
-        displayScripts: row.module.displayScripts ?? [],
+        displayScripts: moduleDisplayScripts(row.module),
         css: row.module.css ?? '',
         backgroundHtml: row.module.backgroundHtml ?? '',
         namespace: row.module.namespace ?? null,
         assets: readerModuleAssetsJson(row),
       })),
+      /**
+       * The reader preset's `editdisplay` regex as display scripts
+       * (`presetDisplayScripts`): RisuAI runs `presetRegex` ahead of the
+       * character's and the modules' scripts on the screen as everywhere.
+       */
+      presetDisplayScripts: presetDisplayScripts(readerPreset?.regex),
       toggles: chatToggles(modules, members, await presetToggles(deps, chat)),
       /**
        * Whether RisuAI's sidebar draws its jailbreak toggle for this chat's preset
        * (`presetHasJailbreak`); its value is a global of the work's, as a toggle's.
        */
-      jailbreak: presetHasJailbreak((await loadReaderPreset(deps, chat)) ?? getPreset(chat.preset)),
+      jailbreak: presetHasJailbreak(readerPreset ?? getPreset(chat.preset)),
       /** RisuAI's `HideIconStore`: no message on this chat shows its sender's picture or name. */
       hideIcons: hidesChatIcons(modules, members),
     });

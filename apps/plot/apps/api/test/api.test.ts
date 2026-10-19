@@ -15319,6 +15319,60 @@ describe('reader modules', () => {
     expect(scripts.scripts.moduleLore.map((entry: any) => entry.content)).toEqual(['창밖에 빗소리가 들린다.']);
   });
 
+  it('runs the chat’s reader preset’s regex in every mode, ahead of the card’s, as RisuAI’s presetRegex runs', async () => {
+    const owner = await signUp('reader-preset-regex@example.com');
+    const plot = await createPlot(owner, { name: '프리셋 정규식', description: '설명', intros: ['문 앞이다'] });
+    await addCharacter(owner, plot.id, { name: '리아', card: { description: '바리스타' } });
+    const chatId = (await startChat(owner, plot.id)).chat.id;
+    // A work without scripts ships no bundle until the preset brings some.
+    expect(await readJson(await request(owner, `/api/chats/${chatId}/scripts`))).toMatchObject({ scripts: null, members: [] });
+    const preset = await readJson(
+      await json(owner, '/api/reader-presets', 'POST', {
+        name: '정규식',
+        regex: [
+          { comment: '입력', in: '안녕', out: '안녕하세요', type: 'editinput' },
+          { comment: '출력', in: '<Thoughts>[\\s\\S]*?</Thoughts>\\n?', out: '', type: 'editoutput' },
+          { comment: '화면', in: '\\[n\\]', out: '<b>줄</b>$n', type: 'editdisplay', ableFlag: true, flag: 'g<no_end_nl>' },
+          { comment: '번역', in: 'a', out: 'b', type: 'edittrans' },
+        ],
+      }),
+    );
+    await json(owner, `/api/chats/${chatId}`, 'PATCH', { readerPresetId: preset.id });
+
+    const scripts = await readJson(await request(owner, `/api/chats/${chatId}/scripts`));
+    expect(scripts.scripts.memberId).toBe(scripts.members[0].memberId);
+    expect(scripts.scripts.editScripts.map((script: any) => script.type)).toEqual(['editinput', 'editoutput']);
+    expect(scripts.translation[0].scripts.map((script: any) => script.in)).toEqual(['a']);
+    // The screen's come with the chat's modules, read off the stored regex.
+    const view = await readJson(await request(owner, `/api/chats/${chatId}/modules`));
+    expect(view.presetDisplayScripts).toEqual([{ in: '\\[n\\]', out: '<b>줄</b>$n', flags: 'g', noEndNl: true, order: 0, enabled: true }]);
+
+    // The page that ran the output scripts finishes the reply the server held for it.
+    const replying = makeApp({
+      getAdapter: () => ({
+        providerModel: 'fixed',
+        adapter: {
+          stream: async function* (): AsyncGenerator<StreamDelta, StreamDone> {
+            yield { type: 'text', text: '<Thoughts>생각</Thoughts>\n대답' };
+            return { usage: { promptTokens: 1, completionTokens: 1 } };
+          },
+        },
+      }),
+    });
+    const events = await readSse(await json(owner, `/api/chats/${chatId}/messages`, 'POST', { content: '안녕하세요', postProcess: true }, replying));
+    const reply = (await readJson(await request(owner, `/api/chats/${chatId}`))).path.at(-1);
+    expect(reply).toMatchObject({ id: events.at(-1)!.data.messageId, scriptState: 'pending' });
+    const committed = await json(owner, `/api/chats/${chatId}/script-commit`, 'POST', {
+      messageId: reply.id,
+      scriptRev: 0,
+      content: '대답',
+      clearPending: true,
+      memberId: scripts.scripts.memberId,
+    });
+    expect(committed.status, await committed.clone().text()).toBe(200);
+    expect((await readJson(committed)).path.at(-1)).toMatchObject({ content: '대답', scriptState: null });
+  });
+
   it('turns a module on for every chat of a work, as RisuAI’s character list does, and by the reader preset’s module integration', async () => {
     const { cookie, plotId, chatId } = await workWithModule('reader-module-lists@example.com');
     const created = await readJson(await upload(cookie, rainFile(), true));

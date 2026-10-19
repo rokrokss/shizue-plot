@@ -217,19 +217,21 @@ function readTranslationScript(value: unknown): TranslationScript | null {
 
 /**
  * The `edittrans` scripts a member's messages are translated through, in
- * RisuAI's sequence: the work's modules' first, then the card's own
- * (`applyEdittransRegex` reads `presetRegex`, `getModuleRegexScripts()`, then the
- * character's `customscript`). Kept apart from `cardScripts`: no runtime runs
- * them, and a card that carries only these is not a scripted card — it does not
- * become the member whose triggers a scene runs (`scriptedMember`).
+ * RisuAI's sequence: the chat's prompt preset's (`presetRegex`, its `regex`)
+ * first, then the work's modules', then the card's own (`applyEdittransRegex`
+ * reads `presetRegex`, `getModuleRegexScripts()`, then the character's
+ * `customscript`). Kept apart from `cardScripts`: no runtime runs them, and a
+ * card that carries only these is not a scripted card — it does not become the
+ * member whose triggers a scene runs (`scriptedMember`).
  */
 export function translationScriptsOf(
   card: Pick<NormalizedCard, 'extensions'>,
   modules: readonly Pick<PlotModule, 'regex'>[] = [],
+  presetRegex: readonly unknown[] = [],
 ): TranslationScript[] {
   const read = (list: unknown): TranslationScript[] =>
     Array.isArray(list) ? list.map(readTranslationScript).filter((script): script is TranslationScript => script !== null) : [];
-  return [...modules.flatMap((module) => read(module.regex)), ...read(risuOf(card)?.['customScripts'])];
+  return [...read(presetRegex), ...modules.flatMap((module) => read(module.regex)), ...read(risuOf(card)?.['customScripts'])];
 }
 
 /** What a work's module brings to the scripts (`PlotModule`). */
@@ -256,6 +258,8 @@ function readScripts(triggerscript: unknown, customScripts: unknown): { triggers
  * The work's `modules` run after the card's own, as RisuAI's `runTrigger`
  * concatenates `char.triggerscript` and `getModuleTriggers()` and its
  * `processScript` the character's `customscript` and `getModuleRegexScripts()`.
+ * The chat's prompt preset's regex (`presetRegex`, its `regex`) runs before all
+ * of them, as `processScriptFull` puts `db.presetRegex` first in every mode.
  * Where they bring any, every trigger carries its own `lowLevelAccess` — the
  * card's on its own, the module's on the module's, as RisuAI's `runTrigger`
  * marks them — and the whole is `lowLevelAccess` where any trigger is. A gate
@@ -265,22 +269,24 @@ function readScripts(triggerscript: unknown, customScripts: unknown): { triggers
 export function cardScripts(
   card: Pick<NormalizedCard, 'extensions'>,
   modules: readonly ModuleScripts[] = [],
+  presetRegex: readonly unknown[] = [],
 ): CardScripts | null {
   const risu = risuOf(card);
   const own = readScripts(risu?.['triggerscript'], risu?.['customScripts']);
+  const preset = readScripts(undefined, presetRegex).editScripts;
   const ownAccess = risu?.['lowLevelAccess'] === true;
   const added = modules
     .map((module) => ({ ...readScripts(module.trigger, module.regex), lowLevelAccess: module.lowLevelAccess === true }))
     .filter((read) => read.triggers.length > 0 || read.editScripts.length > 0);
   if (added.length === 0) {
-    if (own.triggers.length === 0 && own.editScripts.length === 0) return null;
-    return { ...own, lowLevelAccess: ownAccess };
+    if (own.triggers.length === 0 && own.editScripts.length === 0 && preset.length === 0) return null;
+    return { triggers: own.triggers, editScripts: [...preset, ...own.editScripts], lowLevelAccess: ownAccess };
   }
   const marked = (triggers: TriggerScript[], lowLevelAccess: boolean): TriggerScript[] =>
     triggers.map((trigger) => ({ ...trigger, lowLevelAccess }));
   return {
     triggers: [...marked(own.triggers, ownAccess), ...added.flatMap((read) => marked(read.triggers, read.lowLevelAccess))],
-    editScripts: [...own.editScripts, ...added.flatMap((read) => read.editScripts)],
+    editScripts: [...preset, ...own.editScripts, ...added.flatMap((read) => read.editScripts)],
     lowLevelAccess: ownAccess || added.some((read) => read.lowLevelAccess && read.triggers.length > 0),
   };
 }

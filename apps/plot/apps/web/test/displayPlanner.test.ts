@@ -76,7 +76,8 @@ describe('the worker’s job', () => {
     // Prose, and the creator's markup with the bindings already read into it.
     expect(plan.body).toEqual([
       { kind: 'text', text: '앞 ' },
-      { kind: 'html', html: '<div class="hp">HP \u000250\u0003 · \u000112\u0001 · 3</div>' },
+      // The line break RisuAI writes after a template that ends in `>`; the sanitized island drops it.
+      { kind: 'html', html: '<div class="hp">HP \u000250\u0003 · \u000112\u0001 · 3</div>\n' },
       { kind: 'text', text: ' 뒤' },
     ]);
     // Sanitized on the other side, the marks taken off.
@@ -443,7 +444,7 @@ describe('the cooperative deadline', () => {
     // termination never has to.
     let clock = 0;
     const now = (): number => {
-      clock += 30;
+      clock += 100;
       return clock;
     };
     const plan = transformDisplay(

@@ -181,8 +181,13 @@ export function escapeHtml(text: string): string {
  * template that fits on one line.
  */
 const MAX_RENDERED_NODES = 20_000;
-/** A message's; the chat's background has its own (`MAX_BACKGROUND_RENDER_CHARS`, `ChatBackground`). */
-const MAX_RENDERED_CHARS = 100_000;
+/**
+ * A message's; the chat's background has its own (`MAX_BACKGROUND_RENDER_CHARS`,
+ * `ChatBackground`). As long as the display pass's working text may grow
+ * (`MAX_WORKING_CHARS`), since a read of a whole message or of a template that
+ * wraps it all is one render.
+ */
+const MAX_RENDERED_CHARS = 400_000;
 /**
  * `{{#each}}` iterations in one render, every block together. Kept below the
  * core's own cap (5,000), which is a different kind of bound: the core simply

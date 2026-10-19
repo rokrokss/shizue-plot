@@ -1205,6 +1205,49 @@ listenEdit('editDisplay', function(id, v) setChat(id, 0, '화면') addChat(id, '
     expect(messages).toEqual(before);
   });
 
+  it('says nothing of a display pass let go when the chat’s scripts are built anew, and names a dropped write as dropped', async () => {
+    // A lease given back — a module or a preset turned on rebuilds the page's
+    // scripts — answers its calls `disposed`. The set that replaced it draws the
+    // messages again, so a display pass lost nothing; a trigger's writes are lost.
+    const logs: { kind: string; message: string }[] = [];
+    const letGo: LuaSandbox = { call: async () => ({ kind: 'killed', reason: 'disposed' }), dispose: () => undefined };
+    const engine = createLuaEngine({
+      triggers: [lua("listenEdit('editDisplay', function(id, v) return v end)\nfunction onStart(id) setChatVar(id, 'x', '1') end")],
+      lowLevelAccess: false,
+      sandbox: letGo,
+      ui: host,
+      llm: host.llm,
+      similarity: host.similarity,
+      request: host.request,
+      log: (entry) => logs.push({ kind: entry.kind, message: entry.message }),
+    });
+    const scope = {
+      getVar: () => 'null',
+      setVar: () => undefined,
+      variables: () => Object.create(null),
+      getGlobalVar: () => 'null',
+      setGlobalVar: () => undefined,
+      globalVariables: () => Object.create(null),
+      messages: [],
+      character: { name: '리안', description: '', lorebook: [] },
+      setDescription: () => undefined,
+      setLorebook: () => undefined,
+      localLore: [],
+      setLocalLore: () => undefined,
+      setName: () => undefined,
+      setFirstMessage: () => undefined,
+      setBackgroundHtml: () => undefined,
+      user: '',
+      persona: '',
+      note: '',
+      greeting: null,
+    } satisfies CodeScope;
+    expect(await engine.display!([{ text: 'x', chatIndex: 0 }], scope)).toEqual(['x']);
+    expect(logs).toEqual([]);
+    await engine.runCode!({ kind: 'code', language: 'lua', code: '', mode: 'start', scope, lowLevelAccess: false, trigger: 0 });
+    expect(logs).toEqual([{ kind: 'dropped', message: 'the chat’s scripts were built anew while a Lua script ran; what it wrote is dropped' }]);
+  });
+
   it('answers a script’s search with the search it was given', async () => {
     const searched: string[][] = [];
     const triggers = [lua("onStart = async(function(id) setChatVar(id, 'best', similarity(id, '물', { '불', '물' }):await()[1]) end)")];
