@@ -31,8 +31,10 @@ export function BottomSheet({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex flex-col justify-end bg-scrim backdrop-blur-sm"
-      // The backdrop is everything the sheet is not; a click in it closes.
+      className="fixed inset-0 z-50 flex flex-col justify-end cursor-pointer bg-scrim backdrop-blur-sm"
+      // The backdrop is everything the sheet is not; a click in it closes. The
+      // pointer cursor is what makes iOS Safari send a tap on a bare div as a
+      // click at all; the sheet sets its own cursor back.
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -44,7 +46,7 @@ export function BottomSheet({
         aria-label={title}
         data-testid="bottom-sheet"
         tabIndex={-1}
-        className="max-h-[80dvh] overflow-y-auto overscroll-contain rounded-t-2xl border-t border-line bg-raised pt-4 pr-[calc(1.25rem+env(safe-area-inset-right))] pb-[calc(1.25rem+env(safe-area-inset-bottom))] pl-[calc(1.25rem+env(safe-area-inset-left))] focus:outline-none lg:mx-auto lg:w-full lg:max-w-3xl"
+        className="max-h-[80dvh] cursor-auto overflow-y-auto overscroll-contain rounded-t-2xl border-t border-line bg-raised pt-4 pr-[calc(1.25rem+env(safe-area-inset-right))] pb-[calc(1.25rem+env(safe-area-inset-bottom))] pl-[calc(1.25rem+env(safe-area-inset-left))] focus:outline-none lg:mx-auto lg:w-full lg:max-w-3xl"
       >
         <div className="flex items-center justify-between gap-3 pb-4">
           <h2 className="text-sm font-medium text-fg">{title}</h2>
